@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { registerTerminal, unregisterTerminal } from '../lib/terminal-registry'
+import { attachClickToMove } from '../lib/cursor-click'
 import { markInput } from '../lib/perf-probe'
 
 const THEME = {
@@ -111,11 +112,19 @@ export default function TerminalPane({ tabId, sessionId, active }: Props) {
       if (sid) window.api.session.resize(sid, cols, rows)
     })
 
+    // 点一下终端，光标跳到那个位置。本质是算出「按几次左右键」，当普通输入发过去，
+    // 远端 readline / 本机行编辑器都认。全屏程序和开了鼠标上报的程序会自动跳过。
+    const detachClick = attachClickToMove(term, (data) => {
+      const sid = sessionIdRef.current
+      if (sid) window.api.session.write(sid, data)
+    })
+
     const observer = new ResizeObserver(fitNow)
     observer.observe(host)
 
     return () => {
       observer.disconnect()
+      detachClick()
       dataSub.dispose()
       resizeSub.dispose()
       unregisterTerminal(tabId)

@@ -19,6 +19,7 @@
 - xterm.js 6 + WebGL 渲染，全程二进制透传，UTF-8 汉字被 TCP 分包切断也不会变成替换字符
 - 512KB / 128KB 双水位背压：远端狂刷输出时暂停读取，界面不会被拖死
 - 32KB 攒包合并出站，减少 IPC 消息条数（见下方性能一节，这是实测出来的拐点）
+- 点一下终端某处，光标就落到那个位置，接着改就行 —— 不用按一串方向键把光标挪回去
 
 **文件传输（rz / sz）**
 
@@ -86,6 +87,7 @@ npm run perf -- 100 1 drop             # 压测：跳过终端渲染，只测 IP
 npm run startup 3                      # 启动耗时，跑 3 次取中位数
 ZMODEM_PROBE=1 npm run start           # rz/sz 协议自测：13 项断言，纯内存跑，不开窗口
 ZMODEM_E2E=1 npm run start             # rz/sz 端到端：起一台假 lrzsz 主机，走真实 SSH 链路
+npm run test:cursor                    # 点击定位光标：27 项断言，用 headless xterm 验算点位
 ```
 
 `probe.mjs` 支持 `--legacy`（旧算法）、`-k <私钥>`、`-P <密码>`、`-p <端口>`，退出码 0/1 方便串批处理。
@@ -104,7 +106,7 @@ src/
   preload/             contextBridge 暴露的 window.api
   renderer/            React 界面
     components/        TerminalPane / Sidebar / ConnectionDialog / QuickCommandPanel / SecretPrompt
-    lib/               终端注册表、IPC 错误清洗、性能探针
+    lib/               终端注册表、点击定位光标、IPC 错误清洗、性能探针
   shared/              主进程与渲染进程共用的类型和内置命令表
 scripts/               打包、图标生成、模拟服务、压测、启动测量
 ```
@@ -138,6 +140,7 @@ scripts/               打包、图标生成、模拟服务、压测、启动测
 - **本机终端没有 PTY**：因为没有 sshd 也没有 MSVC 工具链（node-pty 编译不了），本机会话走管道直连 PowerShell。代价是 vim / htop 这类全屏程序不可用、Tab 无补全、无法给正在运行的命令发 `Ctrl+C`、窗口尺寸不下传给子进程。主机的 SSH 连接是完整 PTY，不受影响
 - 只在 Windows 上验证过，macOS / Linux 未测试
 - **rz / sz 的边界**：远端要装 `lrzsz`（`apt install lrzsz` / `yum install lrzsz`）；只挂在 SSH 会话上，「本机终端」那一路没有 ZMODEM（PowerShell 侧没有对端）；不支持断点续传，中断后重传整个文件；传输期间键盘被接管（连收尾握手那几毫秒也算），中途想中止按 `Ctrl+C`
+- **点击定位光标的边界**：只能在同一行里挪（含自动换行摊开的多个视觉行）—— 点到上面的历史输出不会有反应，因为 shell 是行式输入，没有按键序列能把光标移回去。全屏程序（vim / htop）和开了鼠标上报的程序（`set -g mouse on` 的 tmux）不接管点击，那一路本来就有自己的鼠标语义。双击选词、`Shift+点击` 扩展选区、点一下清除已有选区，都保持原生行为
 - 没有代码签名，安装时 SmartScreen 可能提示未知发布者
 - 不内置端口转发和 SFTP
 
