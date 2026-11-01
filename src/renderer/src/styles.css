@@ -332,6 +332,7 @@ select:focus {
 /* ---------- 主区域 ---------- */
 
 .main {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -913,4 +914,121 @@ select:focus {
   display: flex;
   gap: 8px;
   margin-top: 2px;
+}
+
+/* ---------- rz / sz 文件传输进度 ---------- */
+
+.transfer-stack {
+  position: absolute;
+  right: 16px;
+  bottom: 44px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 340px;
+  pointer-events: none;
+}
+
+.transfer-card {
+  pointer-events: auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #3a3831;
+  background: rgba(38, 37, 31, 0.96);
+  color: #e8e6dd;
+  font-size: 12px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(6px);
+}
+
+.transfer-card.done {
+  border-color: #4d7a24;
+}
+
+.transfer-card.error {
+  border-color: #8f3232;
+}
+
+.transfer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.transfer-arrow {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: #2f2d27;
+  color: #c9d3a3;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.transfer-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+
+.transfer-size {
+  flex-shrink: 0;
+  color: #a9a69b;
+  font-variant-numeric: tabular-nums;
+}
+
+.transfer-cancel {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid #4a473e;
+  border-radius: 5px;
+  background: transparent;
+  color: #cfccc1;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.transfer-cancel:hover {
+  border-color: #8f3232;
+  color: #f0b4b4;
+}
+
+.transfer-bar {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 2px;
+  background: #2b2a24;
+  overflow: hidden;
+}
+
+.transfer-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: #7ba05b;
+  transition: width 0.12s linear;
+}
+
+.transfer-meta {
+  margin-top: 5px;
+  display: flex;
+  justify-content: space-between;
+  color: #9c998e;
+  font-variant-numeric: tabular-nums;
+}
+
+.transfer-note {
+  margin-top: 6px;
+  color: #a9c47f;
+  word-break: break-all;
+}
+
+.transfer-note.error {
+  color: #e2a1a1;
 }

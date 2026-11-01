@@ -20,6 +20,14 @@
 - 512KB / 128KB 双水位背压：远端狂刷输出时暂停读取，界面不会被拖死
 - 32KB 攒包合并出站，减少 IPC 消息条数（见下方性能一节，这是实测出来的拐点）
 
+**文件传输（rz / sz）**
+
+- 在终端里敲 `sz 文件名` 直接下载，敲 `rz` 弹框选本地文件上传，和 Xshell / SecureCRT 的用法一致
+- 走标准 ZMODEM 协议，`zmodem2` 流式状态机实现，大文件不占内存
+- 下载默认落到系统「下载」目录并弹保存框；上传支持多选，一个 `rz` 连着发多个文件
+- 右下角悬浮进度卡片：方向、文件名、进度条、实时速度、取消按钮；`Ctrl+C` 也能中止，半截文件会被删掉
+- 传输期间键盘输入被接管（避免误触把二进制流搅乱），传完自动交回终端
+
 **快捷命令**
 
 - 32 条内置命令，分 7 组：系统信息、磁盘与文件、网络、进程与服务、日志、Docker、维护（慎用）
@@ -40,6 +48,7 @@
 | 界面 | React 19 + TypeScript |
 | 终端 | xterm.js 6（fit / webgl / web-links） |
 | SSH | ssh2 1.17（纯 JS，无需原生编译） |
+| 文件传输 | zmodem2 1.4（纯 TS，零运行时依赖） |
 | 构建 | electron-vite 6 + Vite 8 |
 | 打包 | electron-builder 26（NSIS） |
 
@@ -75,6 +84,8 @@ npm run perf -- 100 1                  # 压测：100MB 刷屏，1 轮
 npm run perf -- 100 1 ansi             # 压测：彩色 ANSI 日志（转义序列解析更贵）
 npm run perf -- 100 1 drop             # 压测：跳过终端渲染，只测 IPC 上限
 npm run startup 3                      # 启动耗时，跑 3 次取中位数
+ZMODEM_PROBE=1 npm run start           # rz/sz 协议自测：13 项断言，纯内存跑，不开窗口
+ZMODEM_E2E=1 npm run start             # rz/sz 端到端：起一台假 lrzsz 主机，走真实 SSH 链路
 ```
 
 `probe.mjs` 支持 `--legacy`（旧算法）、`-k <私钥>`、`-P <密码>`、`-p <端口>`，退出码 0/1 方便串批处理。
@@ -85,6 +96,7 @@ npm run startup 3                      # 启动耗时，跑 3 次取中位数
 src/
   main/                主进程（唯一能碰 Node 和网络的地方）
     ssh/               连接、认证、算法白名单、错误翻译、四阶段诊断
+    zmodem/            rz/sz 文件传输：起始帧检测 + 协议引擎 + 对话框外壳
     local/             本机 PowerShell 会话（无 PTY，自带行编辑器）
     store/             连接与快捷命令的持久化，凭据加密
     dev/               冒烟截图、压测、本机终端自测
@@ -125,6 +137,7 @@ scripts/               打包、图标生成、模拟服务、压测、启动测
 
 - **本机终端没有 PTY**：因为没有 sshd 也没有 MSVC 工具链（node-pty 编译不了），本机会话走管道直连 PowerShell。代价是 vim / htop 这类全屏程序不可用、Tab 无补全、无法给正在运行的命令发 `Ctrl+C`、窗口尺寸不下传给子进程。主机的 SSH 连接是完整 PTY，不受影响
 - 只在 Windows 上验证过，macOS / Linux 未测试
+- **rz / sz 的边界**：远端要装 `lrzsz`（`apt install lrzsz` / `yum install lrzsz`）；只挂在 SSH 会话上，「本机终端」那一路没有 ZMODEM（PowerShell 侧没有对端）；不支持断点续传，中断后重传整个文件；传输期间键盘被接管（连收尾握手那几毫秒也算），中途想中止按 `Ctrl+C`
 - 没有代码签名，安装时 SmartScreen 可能提示未知发布者
 - 不内置端口转发和 SFTP
 

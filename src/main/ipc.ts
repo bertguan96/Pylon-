@@ -105,6 +105,10 @@ export function registerIpc(
     sessions.close(sessionId)
   })
 
+  ipcMain.on('zmodem:cancel', (_e, sessionId: string) => {
+    sessions.cancelZmodem(sessionId)
+  })
+
   // ---------- 快捷命令 ----------
 
   ipcMain.handle('quick:list', (): QuickCommand[] => quick.list())

@@ -136,12 +136,28 @@ export interface QuickCommandInput {
   description?: string
 }
 
+/** ZMODEM（rz / sz）文件传输的实时状态 */
+export interface ZmodemState {
+  sessionId: string
+  /** download = 远端 sz 发给我们；upload = 远端 rz 让我们发 */
+  direction: 'download' | 'upload'
+  name: string
+  transferred: number
+  total: number
+  status: 'active' | 'done' | 'error'
+  /** 落盘路径（下载成功时有值） */
+  path?: string
+  /** status 为 error 时的原因 */
+  message?: string
+}
+
 /** 主进程 → 渲染进程的推送事件 */
 export type MainEvent =
   | { type: 'session:data'; sessionId: string; data: Uint8Array }
   | { type: 'session:status'; sessionId: string; status: SessionStatus; error?: string }
   | { type: 'session:exit'; sessionId: string; code: number | null }
   | { type: 'session:title'; sessionId: string; title: string }
+  | { type: 'zmodem:update'; state: ZmodemState }
 
 /** 渲染进程暴露给页面的 API 形状，preload 必须与之严格一致 */
 export interface BridgeApi {
@@ -161,6 +177,8 @@ export interface BridgeApi {
     close: (sessionId: string) => Promise<void>
     /** 渲染端消费完一批数据后的确认，用于主进程背压控制 */
     ack: (sessionId: string, bytes: number) => void
+    /** 中止正在进行的 rz / sz 传输 */
+    cancelZmodem: (sessionId: string) => void
   }
   quickCommands: {
     /** 返回内置命令 + 自定义命令的合并结果 */

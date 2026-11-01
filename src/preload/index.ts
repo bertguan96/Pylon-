@@ -20,7 +20,8 @@ const api: BridgeApi = {
     write: (sessionId, data) => ipcRenderer.send('session:write', sessionId, data),
     resize: (sessionId, cols, rows) => ipcRenderer.send('session:resize', sessionId, cols, rows),
     close: (sessionId) => ipcRenderer.invoke('session:close', sessionId),
-    ack: (sessionId, bytes) => ipcRenderer.send('session:ack', sessionId, bytes)
+    ack: (sessionId, bytes) => ipcRenderer.send('session:ack', sessionId, bytes),
+    cancelZmodem: (sessionId) => ipcRenderer.send('zmodem:cancel', sessionId)
   },
   quickCommands: {
     list: () => ipcRenderer.invoke('quick:list'),

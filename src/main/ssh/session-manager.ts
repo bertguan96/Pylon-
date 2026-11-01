@@ -1,5 +1,7 @@
 import type { Client, ClientChannel } from 'ssh2'
+import type { BrowserWindow } from 'electron'
 import { LocalSession } from '../local/local-session'
+import { ZmodemController, type ZmodemDialogs } from '../zmodem/controller'
 import { loadSsh2 } from './client'
 import { randomUUID } from 'node:crypto'
 import { LEGACY_ALGORITHMS } from './algorithms'
@@ -88,11 +90,22 @@ class Session {
   private outBuf: Buffer[] = []
   private outLen = 0
   private flushHandle: NodeJS.Immediate | null = null
+  /** rz / sz 文件传输：命中后接管整条数据流 */
+  private zmodem: ZmodemController | null = null
   private readonly emit: EmitFn
+  private readonly getWindow: () => BrowserWindow | null
+  private readonly zmodemDialogs: ZmodemDialogs | undefined
 
-  constructor(connection: ConnectionConfig, emit: EmitFn) {
+  constructor(
+    connection: ConnectionConfig,
+    emit: EmitFn,
+    getWindow: () => BrowserWindow | null,
+    zmodemDialogs?: ZmodemDialogs
+  ) {
     this.connection = connection
     this.emit = emit
+    this.getWindow = getWindow
+    this.zmodemDialogs = zmodemDialogs
   }
 
   private setStatus(status: SessionStatus, error?: string) {
@@ -179,25 +192,23 @@ class Session {
   }
 
   private bindStream(stream: ClientChannel) {
+    // 远端敲 sz / rz 时，控制序列会被识别并接管整条流，此时终端看不到中间数据
+    this.zmodem = new ZmodemController({
+      sessionId: this.id,
+      emit: this.emit,
+      send: (bytes) => this.stream?.write(Buffer.from(bytes)),
+      getWindow: this.getWindow,
+      dialogs: this.zmodemDialogs
+    })
+
     stream.on('data', (chunk: Buffer) => {
-      // 全程按二进制透传，绝不 toString：UTF-8 汉字被 TCP 分包切断后会变成替换字符
-      const t = this.traffic
-      const now = performance.now()
-      if (!t.firstAt) t.firstAt = now
-      t.lastAt = now
-      t.bytesIn += chunk.length
-      t.chunks++
-
-      this.pendingBytes += chunk.length
-      if (this.pendingBytes > t.maxPending) t.maxPending = this.pendingBytes
-
-      this.enqueue(chunk)
-
-      if (this.pendingBytes > HIGH_WATERMARK && !this.paused) {
-        stream.pause()
-        this.paused = true
-        t.pauses++
-        this.pausedAt = now
+      try {
+        this.onStreamData(stream, chunk)
+      } catch (err) {
+        // 单个数据分片处理出错（协议状态异常之类）不能把整条会话带崩：
+        // 让它当普通终端输出照常显示，用户至少还能继续操作
+        console.error('[session] 数据处理异常：', (err as Error).message)
+        this.enqueue(chunk)
       }
     })
 
@@ -215,6 +226,36 @@ class Session {
     stream.stderr.on('data', (chunk: Buffer) => {
       this.enqueue(chunk)
     })
+  }
+
+  private onStreamData(stream: ClientChannel, chunk: Buffer): void {
+    // 注意这里不能写 `?? chunk`：控制器返回 null 是「这段数据被传输吃掉了」的意思，
+    // 用空值合并会把原始二进制又漏回终端（协议流直接糊屏）。三元判断才是对的。
+    const shown = this.zmodem ? this.zmodem.onData(chunk) : chunk
+    // 被传输吃掉的数据不往终端走，也不计入待确认队列（否则水位永远降不下来）
+    if (!shown || shown.length === 0) return
+
+    // 全程按二进制透传，绝不 toString：UTF-8 汉字被 TCP 分包切断后会变成替换字符
+    const t = this.traffic
+    const now = performance.now()
+    if (!t.firstAt) t.firstAt = now
+    t.lastAt = now
+    t.bytesIn += chunk.length
+    t.chunks++
+
+    this.pendingBytes += shown.length
+    if (this.pendingBytes > t.maxPending) t.maxPending = this.pendingBytes
+
+    this.enqueue(
+      Buffer.isBuffer(shown) ? shown : Buffer.from(shown.buffer, shown.byteOffset, shown.byteLength)
+    )
+
+    if (this.pendingBytes > HIGH_WATERMARK && !this.paused) {
+      stream.pause()
+      this.paused = true
+      t.pauses++
+      this.pausedAt = now
+    }
   }
 
   /**
@@ -273,7 +314,14 @@ class Session {
   }
 
   write(data: string) {
+    // 传输中键盘输入会喂坏 ZMODEM 协议，只放行 Ctrl+C 作为中止
+    if (this.zmodem?.onInput(data)) return
     if (this.stream && this.status === 'connected') this.stream.write(data)
+  }
+
+  /** 中止正在进行的 rz / sz */
+  cancelZmodem() {
+    this.zmodem?.cancel()
   }
 
   resize(cols: number, rows: number) {
@@ -285,6 +333,8 @@ class Session {
 
   close() {
     this.closedByUser = true
+    this.zmodem?.dispose()
+    this.zmodem = null
     if (this.flushHandle) {
       clearImmediate(this.flushHandle)
       this.flushHandle = null
@@ -301,13 +351,21 @@ export class SessionManager {
   /** SSH 会话和本机会话共用一张表，管理器只依赖它们的公共方法 */
   private sessions = new Map<string, Session | LocalSession>()
   private emit: EmitFn
+  private getWindow: () => BrowserWindow | null
+  private zmodemDialogs: ZmodemDialogs | undefined
 
-  constructor(emit: EmitFn) {
+  constructor(
+    emit: EmitFn,
+    getWindow: () => BrowserWindow | null = () => null,
+    zmodemDialogs?: ZmodemDialogs
+  ) {
     this.emit = emit
+    this.getWindow = getWindow
+    this.zmodemDialogs = zmodemDialogs
   }
 
   async open(connection: ConnectionConfig, secret: string | undefined, cols: number, rows: number): Promise<SessionInfo> {
-    const session = new Session(connection, this.emit)
+    const session = new Session(connection, this.emit, this.getWindow, this.zmodemDialogs)
     this.sessions.set(session.id, session)
     try {
       await session.connect(secret, cols, rows)
@@ -341,6 +399,12 @@ export class SessionManager {
 
   ack(id: string, bytes: number) {
     this.sessions.get(id)?.ack(bytes)
+  }
+
+  /** 中止 rz / sz；本机会话没有传输能力，忽略即可 */
+  cancelZmodem(id: string) {
+    const s = this.sessions.get(id)
+    if (s instanceof Session) s.cancelZmodem()
   }
 
   /** 压测读取流量统计；正常运行时无人调用，零额外开销 */

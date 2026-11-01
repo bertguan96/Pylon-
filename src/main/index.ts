@@ -8,6 +8,8 @@ import { createEmitter, registerIpc } from './ipc'
 import { forwardRendererConsole, maybeRunSmokeCapture } from './dev/smoke'
 import { maybeRunPerf } from './dev/perf'
 import { maybeRunLocalProbe } from './dev/local-probe'
+import { maybeRunZmodemProbe } from './dev/zmodem-probe'
+import { maybeRunZmodemE2E } from './dev/zmodem-e2e'
 import type { MainEvent } from '../shared/types'
 
 /**
@@ -129,15 +131,23 @@ app.whenReady().then(async () => {
   await quickCommands.load()
   markStartup('stores')
 
-  sessions = new SessionManager((evt) => {
-    send(evt)
-    eventTap?.(evt)
-  })
+  sessions = new SessionManager(
+    (evt) => {
+      send(evt)
+      eventTap?.(evt)
+    },
+    // 保存/选择文件的对话框要挂在主窗口上
+    getWindow
+  )
   registerIpc(store, quickCommands, sessions, getWindow)
   markStartup('ipc')
 
   // 本机终端自测：LOCAL_PROBE=1 时接管事件流，跑完自行退出
   maybeRunLocalProbe(sessions, (fn) => setEventTap(fn))
+  // rz / sz 自测：ZMODEM_PROBE=1 时跑完退出，不开窗口
+  maybeRunZmodemProbe()
+  // rz / sz 端到端自测：ZMODEM_E2E=1 时起一个假 lrzsz 主机，跑完整条 SSH 链路
+  maybeRunZmodemE2E()
 
   if (process.env.DEMO_SEED) {
     const exists = store.list().some((c) => c.host === '127.0.0.1' && c.port === 2222)

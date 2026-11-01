@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ConnectionConfig, QuickCommand, SessionStatus } from '../../shared/types'
+import type { ConnectionConfig, QuickCommand, SessionStatus, ZmodemState } from '../../shared/types'
 import { LOCAL_CONNECTION_ID } from '../../shared/types'
 import Sidebar from './components/Sidebar'
 import ConnectionDialog from './components/ConnectionDialog'
 import SecretPrompt from './components/SecretPrompt'
 import QuickCommandPanel from './components/QuickCommandPanel'
+import TransferStack from './components/TransferStack'
 import {
   getTerminalSize,
   remapSession,
@@ -46,6 +47,8 @@ export default function App() {
     null
   )
   const [quickOpen, setQuickOpen] = useState(false)
+  /** rz / sz 传输进度，按 sessionId 归类 */
+  const [transfers, setTransfers] = useState<Record<string, ZmodemState>>({})
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([])
 
   const tabsRef = useRef<UiTab[]>([])
@@ -245,6 +248,24 @@ export default function App() {
   // 主进程事件订阅只注册一次
   useEffect(() => {
     return window.api.onEvent((evt) => {
+      if (evt.type === 'zmodem:update') {
+        const state = evt.state
+        setTransfers((prev) => ({ ...prev, [state.sessionId]: state }))
+        // 结束态停留几秒后自动消失
+        if (state.status !== 'active') {
+          const ttl = state.status === 'done' ? 4000 : 8000
+          setTimeout(() => {
+            setTransfers((prev) => {
+              if (prev[state.sessionId]?.status !== state.status) return prev
+              const next = { ...prev }
+              delete next[state.sessionId]
+              return next
+            })
+          }, ttl)
+        }
+        return
+      }
+
       const tab = tabsRef.current.find((t) => t.sessionId === evt.sessionId)
       if (!tab) return
 
@@ -361,6 +382,11 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          <TransferStack
+            transfers={Object.values(transfers)}
+            onCancel={(sessionId) => window.api.session.cancelZmodem(sessionId)}
+          />
 
           <div className="pane-wrap">
             {tabs.length === 0 && (
