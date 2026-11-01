@@ -1,0 +1,27 @@
+# 依赖
+node_modules/
+
+# 构建产物
+out/
+release/
+dist/
+build-output/
+build-output-*/
+
+# 预打包的 Electron 运行时（300MB+，本地用 scripts/prepare-electron-dist.mjs 生成）
+build/electron-dist/
+build/*.ico
+build/*.png
+
+# 冒烟截图
+.smoke/
+.smoke-*/
+
+# 本地工作区数据（连接记录、压测日志、截图、备份）
+.workbuddy/
+
+# 运行日志与临时文件
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

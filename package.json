@@ -1,0 +1,39 @@
+{
+  "name": "pylon",
+  "version": "0.1.0",
+  "description": "Pylon — 轻量 SSH 客户端",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "node scripts/run.mjs dev",
+    "build": "electron-vite build",
+    "start": "node scripts/run.mjs preview",
+    "typecheck": "tsc --noEmit",
+    "package": "node scripts/package.mjs",
+    "probe": "node scripts/probe.mjs",
+    "perf": "node scripts/perf.mjs",
+    "startup": "node scripts/startup.mjs"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ssh2": "^1.15.6",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "ssh2": "^1.17.0"
+  },
+  "productName": "Pylon"
+}

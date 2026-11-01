@@ -1,0 +1,41 @@
+appId: com.guanabc.pylon
+productName: Pylon
+copyright: Personal use
+
+# 直接使用本地已解压的 Electron，跳过「解压到 tmp 再改名」的步骤
+# （本机安全策略会拦截目录 rename，导致打包中断）
+electronDist: build/electron-dist
+
+directories:
+  buildResources: build
+  output: build-output-6
+
+files:
+  - out/**
+  - "!**/.DS_Store"
+  - "!**/*.map"
+
+# ssh2 是纯 JS，asar 内可正常 require；遇到原生模块时再在这里补 asarUnpack
+asar: true
+
+# ssh2 为纯 JS 实现，无需针对 Electron 重编译原生模块
+npmRebuild: false
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Pylon
+  artifactName: ${productName}-${version}-Setup.${ext}
+
+compression: maximum
+

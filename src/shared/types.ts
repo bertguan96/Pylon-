@@ -1,0 +1,172 @@
+/**
+ * 主进程 / preload / 渲染进程共用的类型契约。
+ * 任何跨进程传输的结构都在这里定义，避免三端各写一份而漂移。
+ */
+
+/** 认证方式。keyboard-interactive 单独列出，很多国内云主机与老设备只认它。 */
+export type AuthType = 'password' | 'privateKey' | 'agent'
+
+/** 一条连接配置。注意：这里【不包含】密码和私钥口令，它们单独加密存储。 */
+export interface ConnectionConfig {
+  id: string
+  name: string
+  host: string
+  port: number
+  username: string
+  authType: AuthType
+  /** privateKey 认证时的私钥文件绝对路径 */
+  privateKeyPath?: string
+  /** 分组名，用于侧边栏归类 */
+  group?: string
+  /** 标签颜色标识 */
+  color?: string
+  /**
+   * 放开老算法白名单。老摄像头、老 NAS 往往只支持 sha1 系列 KEX/MAC，
+   * 不开这个开关会直接握手失败。默认 false。
+   */
+  legacyAlgorithms: boolean
+  /** 建连超时（毫秒） */
+  timeout: number
+  /** 是否已保存凭据（密码或私钥口令），仅用来决定 UI 是否要弹输入框 */
+  hasSecret: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+/** 新建 / 编辑连接时提交的表单数据 */
+export interface ConnectionInput {
+  id?: string
+  name: string
+  host: string
+  port: number
+  username: string
+  authType: AuthType
+  privateKeyPath?: string
+  group?: string
+  color?: string
+  legacyAlgorithms: boolean
+  timeout?: number
+  /** 明文密码或私钥口令。传 undefined 表示"沿用已保存的"，传空串表示"清空" */
+  secret?: string
+  /** 是否把 secret 持久化（默认 true） */
+  rememberSecret?: boolean
+}
+
+/** 会话生命周期状态 */
+export type SessionStatus = 'connecting' | 'connected' | 'closed' | 'error'
+
+export interface SessionInfo {
+  sessionId: string
+  connectionId: string
+  title: string
+  host: string
+  username: string
+  status: SessionStatus
+  /** status 为 error 时的可读原因 */
+  error?: string
+  /** 远端 PTY 的初始列数，用于渲染端首次布局 */
+  cols: number
+  rows: number
+}
+
+/** 打开会话的入参 */
+export interface OpenSessionRequest {
+  connectionId: string
+  /** 用户临时输入的密码/口令；不传则用已保存的 */
+  secret?: string
+  cols: number
+  rows: number
+}
+
+/**
+ * 本机 shell 的伪连接 ID。
+ * 它不是一条真实的 SSH 配置，只是让「本机终端」能复用标签、状态栏那一套 UI。
+ */
+export const LOCAL_CONNECTION_ID = '__local__'
+
+/** 打开本机 shell 的入参：只需要初始尺寸，没有主机和凭据 */
+export interface OpenLocalSessionRequest {
+  cols: number
+  rows: number
+}
+
+/** 连通性 / 认证诊断结果 */
+export interface DiagnoseResult {
+  ok: boolean
+  /** 分阶段结论：tcp / handshake / auth / shell */
+  stage: 'tcp' | 'handshake' | 'auth' | 'shell' | 'done'
+  message: string
+  /** 协商成功的算法，排查老设备时非常有用 */
+  negotiated?: {
+    kex?: string
+    cipher?: string
+    mac?: string
+    serverHostKey?: string
+  }
+  latencyMs?: number
+}
+
+/**
+ * 一条快捷命令（命令片段）。
+ *
+ * autoRun 决定点击后是否自动回车：
+ * 只读诊断类命令直接执行，改状态的命令（重启服务、reboot）只填入不执行 ——
+ * 误点一次不至于把线上服务停了。
+ */
+export interface QuickCommand {
+  id: string
+  label: string
+  command: string
+  group: string
+  autoRun: boolean
+  /** 内置命令：只能使用，不能编辑或删除 */
+  builtin?: boolean
+  /** 会改变系统状态的操作，UI 上做警示 */
+  danger?: boolean
+  description?: string
+}
+
+/** 新建 / 编辑自定义快捷命令 */
+export interface QuickCommandInput {
+  id?: string
+  label: string
+  command: string
+  group?: string
+  autoRun: boolean
+  description?: string
+}
+
+/** 主进程 → 渲染进程的推送事件 */
+export type MainEvent =
+  | { type: 'session:data'; sessionId: string; data: Uint8Array }
+  | { type: 'session:status'; sessionId: string; status: SessionStatus; error?: string }
+  | { type: 'session:exit'; sessionId: string; code: number | null }
+  | { type: 'session:title'; sessionId: string; title: string }
+
+/** 渲染进程暴露给页面的 API 形状，preload 必须与之严格一致 */
+export interface BridgeApi {
+  connections: {
+    list: () => Promise<ConnectionConfig[]>
+    save: (input: ConnectionInput) => Promise<ConnectionConfig>
+    remove: (id: string) => Promise<void>
+    diagnose: (input: ConnectionInput) => Promise<DiagnoseResult>
+    pickPrivateKey: () => Promise<string | null>
+  }
+  session: {
+    open: (req: OpenSessionRequest) => Promise<SessionInfo>
+    /** 打开本机 shell（不走 SSH，不需要任何连接配置） */
+    openLocal: (req: OpenLocalSessionRequest) => Promise<SessionInfo>
+    write: (sessionId: string, data: string) => void
+    resize: (sessionId: string, cols: number, rows: number) => void
+    close: (sessionId: string) => Promise<void>
+    /** 渲染端消费完一批数据后的确认，用于主进程背压控制 */
+    ack: (sessionId: string, bytes: number) => void
+  }
+  quickCommands: {
+    /** 返回内置命令 + 自定义命令的合并结果 */
+    list: () => Promise<QuickCommand[]>
+    save: (input: QuickCommandInput) => Promise<QuickCommand>
+    remove: (id: string) => Promise<void>
+  }
+  onEvent: (handler: (event: MainEvent) => void) => () => void
+}
