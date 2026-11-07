@@ -1032,3 +1032,110 @@ select:focus {
 .transfer-note.error {
   color: #e2a1a1;
 }
+
+/* ---------------- 远程桌面（VNC） ---------------- */
+
+/* 连接对话框顶部的类型切换 */
+.kind-switch {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.kind-switch button {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 7px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.kind-switch button:hover {
+  color: var(--text);
+}
+
+.kind-switch button.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(38, 37, 31, 0.12);
+}
+
+/* 侧边栏里区分「桌面」条目 */
+.kind-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  letter-spacing: 0.02em;
+}
+
+/* 画布容器：黑色舞台，画面等比居中 */
+.rd-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #17171a;
+  border-radius: 8px;
+  overflow: hidden;
+  outline: none;
+}
+
+.rd-host:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.rd-canvas {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  /* 画面本身就是像素，缩放时别加过度平滑，文字才不糊 */
+  image-rendering: -webkit-optimize-contrast;
+  cursor: default;
+}
+
+.rd-empty {
+  position: absolute;
+  color: #a8a8a8;
+  font-size: 12px;
+}
+
+.rd-foot {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #d6d6d6;
+  font-size: 11px;
+  pointer-events: none;
+  max-width: calc(100% - 20px);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rd-toast {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #f0f0f0;
+  font-size: 12px;
+  pointer-events: none;
+}

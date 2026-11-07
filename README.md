@@ -1,6 +1,6 @@
 # Pylon
 
-一个为 Windows 写的桌面 SSH 客户端。终端、多标签、快捷命令都收在一个 1240×800 的窗口里，装完双击就能用。
+一个为 Windows 写的桌面 SSH 客户端。终端、多标签、快捷命令都收在一个 1240×800 的窗口里，装完双击就能用。同一份界面里还能直接连远程桌面（VNC），不用再装第三方的远程控制软件。
 
 用 Electron + React + xterm.js 构建，SSH 连接全部跑在主进程，渲染进程只能通过类型化 IPC 跟它说话。
 
@@ -29,6 +29,23 @@
 - 右下角悬浮进度卡片：方向、文件名、进度条、实时速度、取消按钮；`Ctrl+C` 也能中止，半截文件会被删掉
 - 传输期间键盘输入被接管（避免误触把二进制流搅乱），传完自动交回终端
 
+**远程桌面（VNC）**
+
+- 对面零安装：Mac 上勾一下「屏幕共享」，Pylon 里新建一条 VNC 连接就能看到桌面、直接操作
+- 自己写的 RFB 客户端（RFC 6143），不依赖任何第三方 VNC 库：版本协商 3.3 / 3.7 / 3.8、VNC 密码认证、ZRLE / CopyRect / Raw 三种编码
+- 像素格式统一成 32bpp 小端、红通道落在第 16 位，解码出来的内存布局正好是 B、G、R、`0xFF` —— 加一个 alpha 就能直接 `putImageData`，全程零位运算
+- ZRLE 的 zlib 上下文整条会话共用（不是每帧新建），解压失败自动退回 Raw：画面不会花，只是流量变大
+- 鼠标按 X11 keysym 上行，滚轮、右键、`Win` 键（映射成 Command）都通；`Ctrl+Shift+V` 把本地剪贴板推给远端，远端复制的文本自动写回系统剪贴板
+- 状态栏实时显示分辨率与 fps / kbps；标签切到后台就停止拉帧，既省 CPU 也不让 Wi-Fi 白跑流量
+
+**Mac 侧三步（一次性）**
+
+1. 系统设置 → 通用 → 共享 → 打开「屏幕共享」
+2. 点旁边的「电脑设置」→ 勾选「VNC 显示程序可使用密码控制屏幕」→ 设一个密码
+3. 记下 Mac 的 IP（系统设置 → Wi-Fi → 详细信息）
+
+然后在 Pylon 里 `+` → 类型选「远程桌面（VNC）」→ 填 IP 和密码 →「测试连接」确认通了 → 保存。
+
 **快捷命令**
 
 - 32 条内置命令，分 7 组：系统信息、磁盘与文件、网络、进程与服务、日志、Docker、维护（慎用）
@@ -50,6 +67,7 @@
 | 终端 | xterm.js 6（fit / webgl / web-links） |
 | SSH | ssh2 1.17（纯 JS，无需原生编译） |
 | 文件传输 | zmodem2 1.4（纯 TS，零运行时依赖） |
+| 远程桌面 | 自写 RFB 客户端（RFC 6143）+ `node:net` / `node:zlib`，无第三方库 |
 | 构建 | electron-vite 6 + Vite 8 |
 | 打包 | electron-builder 26（NSIS） |
 
@@ -80,6 +98,7 @@ npm run package                          # 出 NSIS 安装包
 
 ```bash
 node scripts/mock-sshd.mjs 2222        # 本地模拟 SSH 服务（密码 demo/demo1234），用来跑通链路
+node scripts/mock-rfb.mjs 5911 1024 640  # 本地模拟 VNC 服务端（渐变画面 + 移动方块），调远程桌面界面
 node scripts/probe.mjs 10.0.0.5 -u root  # 不启动 Electron，单独诊断某台机器能不能连
 npm run perf -- 100 1                  # 压测：100MB 刷屏，1 轮
 npm run perf -- 100 1 ansi             # 压测：彩色 ANSI 日志（转义序列解析更贵）
@@ -88,6 +107,7 @@ npm run startup 3                      # 启动耗时，跑 3 次取中位数
 ZMODEM_PROBE=1 npm run start           # rz/sz 协议自测：13 项断言，纯内存跑，不开窗口
 ZMODEM_E2E=1 npm run start             # rz/sz 端到端：起一台假 lrzsz 主机，走真实 SSH 链路
 npm run test:cursor                    # 点击定位光标：27 项断言，用 headless xterm 验算点位
+VNC_PROBE=1 npm run start              # 远程桌面自测：23 项断言，进程内起假 RFB 服务端逐字节对拍
 ```
 
 `probe.mjs` 支持 `--legacy`（旧算法）、`-k <私钥>`、`-P <密码>`、`-p <端口>`，退出码 0/1 方便串批处理。
@@ -99,14 +119,15 @@ src/
   main/                主进程（唯一能碰 Node 和网络的地方）
     ssh/               连接、认证、算法白名单、错误翻译、四阶段诊断
     zmodem/            rz/sz 文件传输：起始帧检测 + 协议引擎 + 对话框外壳
+    vnc/               RFB 客户端：握手与认证、DES、Raw/CopyRect/ZRLE 解码、会话管理
     local/             本机 PowerShell 会话（无 PTY，自带行编辑器）
     store/             连接与快捷命令的持久化，凭据加密
     dev/               冒烟截图、压测、本机终端自测
     ipc.ts             全部 IPC 通道，一处注册
   preload/             contextBridge 暴露的 window.api
   renderer/            React 界面
-    components/        TerminalPane / Sidebar / ConnectionDialog / QuickCommandPanel / SecretPrompt
-    lib/               终端注册表、点击定位光标、IPC 错误清洗、性能探针
+    components/        TerminalPane / RemoteDesktopPane / Sidebar / ConnectionDialog / QuickCommandPanel / SecretPrompt
+    lib/               终端注册表、远程桌面帧分发、键位映射、点击定位光标、IPC 错误清洗、性能探针
   shared/              主进程与渲染进程共用的类型和内置命令表
 scripts/               打包、图标生成、模拟服务、压测、启动测量
 ```
@@ -141,6 +162,8 @@ scripts/               打包、图标生成、模拟服务、压测、启动测
 - 只在 Windows 上验证过，macOS / Linux 未测试
 - **rz / sz 的边界**：远端要装 `lrzsz`（`apt install lrzsz` / `yum install lrzsz`）；只挂在 SSH 会话上，「本机终端」那一路没有 ZMODEM（PowerShell 侧没有对端）；不支持断点续传，中断后重传整个文件；传输期间键盘被接管（连收尾握手那几毫秒也算），中途想中止按 `Ctrl+C`
 - **点击定位光标的边界**：只能在同一行里挪（含自动换行摊开的多个视觉行）—— 点到上面的历史输出不会有反应，因为 shell 是行式输入，没有按键序列能把光标移回去。全屏程序（vim / htop）和开了鼠标上报的程序（`set -g mouse on` 的 tmux）不接管点击，那一路本来就有自己的鼠标语义。双击选词、`Shift+点击` 扩展选区、点一下清除已有选区，都保持原生行为
+- **远程桌面的边界**：传的是画面帧，不是 H.264 视频流 —— 局域网里 20~30fps，拖动窗口会有轻微拖影；看视频、玩游戏这类需求走 Parsec，VNC 这一路只适合操作桌面、跑命令。VNC 密码在协议层只认前 8 个字节，超出部分会被远端忽略（这是 RFB 的设计，不是本客户端的限制），建议密码就用 8 位以内。没有音频，也没有文件传输（要传文件走旁边的 SSH 标签页）。画面按远端真实分辨率传输、本地等比缩放，不做重采样 —— 宁可糊一点，也不花 CPU
+- **VNC 的验证范围**：握手、认证、Raw / CopyRect / ZRLE 解码、键鼠与剪贴板都是对着自写的假服务端逐字节对拍的（`VNC_PROBE=1`，23 项断言），尚无真机 Mac 的联调记录。万一 ZRLE 解码和 Apple 的实现对不上，会自动退回 Raw：画面照常显示，只是流量变大。真机首次连接如果画面异常，先看主进程日志里的 `[vnc] ZRLE 解码失败`
 - 没有代码签名，安装时 SmartScreen 可能提示未知发布者
 - 不内置端口转发和 SFTP
 

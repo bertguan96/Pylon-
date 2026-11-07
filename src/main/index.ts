@@ -10,6 +10,8 @@ import { maybeRunPerf } from './dev/perf'
 import { maybeRunLocalProbe } from './dev/local-probe'
 import { maybeRunZmodemProbe } from './dev/zmodem-probe'
 import { maybeRunZmodemE2E } from './dev/zmodem-e2e'
+import { maybeRunVncProbe } from './dev/vnc-probe'
+import { VncManager } from './vnc/manager'
 import type { MainEvent } from '../shared/types'
 
 /**
@@ -40,6 +42,7 @@ let mainWindow: BrowserWindow | null = null
 let store!: ConnectionStore
 let quickCommands!: QuickCommandStore
 let sessions!: SessionManager
+let vnc!: VncManager
 
 /**
  * 启动耗时打点（PERF_STARTUP=1 时输出）。
@@ -139,7 +142,8 @@ app.whenReady().then(async () => {
     // 保存/选择文件的对话框要挂在主窗口上
     getWindow
   )
-  registerIpc(store, quickCommands, sessions, getWindow)
+  vnc = new VncManager(send)
+  registerIpc(store, quickCommands, sessions, vnc, getWindow)
   markStartup('ipc')
 
   // 本机终端自测：LOCAL_PROBE=1 时接管事件流，跑完自行退出
@@ -148,6 +152,8 @@ app.whenReady().then(async () => {
   maybeRunZmodemProbe()
   // rz / sz 端到端自测：ZMODEM_E2E=1 时起一个假 lrzsz 主机，跑完整条 SSH 链路
   maybeRunZmodemE2E()
+  // 远程桌面自测：VNC_PROBE=1 时起一个假 RFB 服务端，跑完退出
+  maybeRunVncProbe()
 
   if (process.env.DEMO_SEED) {
     const exists = store.list().some((c) => c.host === '127.0.0.1' && c.port === 2222)
@@ -189,9 +195,11 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   sessions?.closeAll()
+  vnc?.closeAll()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', () => {
   sessions?.closeAll()
+  vnc?.closeAll()
 })

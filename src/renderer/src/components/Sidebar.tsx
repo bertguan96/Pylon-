@@ -97,15 +97,20 @@ export default function Sidebar({
                     : undefined
                 }
                 onClick={() => onConnect(conn)}
-                title={`${conn.username}@${conn.host}:${conn.port}`}
+                title={
+                  conn.kind === 'vnc'
+                    ? `${conn.host}:${conn.port} · 远程桌面`
+                    : `${conn.username}@${conn.host}:${conn.port}`
+                }
               >
                 <span className="conn-dot" style={{ background: dotColor(conn.id) }} />
                 <div className="conn-main">
                   <div className="conn-name">{conn.name}</div>
                   <div className="conn-sub">
-                    {conn.username}@{conn.host}
+                    {conn.kind === 'vnc' ? `${conn.host} · VNC` : `${conn.username}@${conn.host}`}
                   </div>
                 </div>
+                {conn.kind === 'vnc' && <span className="kind-tag">桌面</span>}
                 <div className="conn-actions" onClick={(e) => e.stopPropagation()}>
                   <button
                     title="编辑"

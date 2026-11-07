@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron'
+import { BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
 import type {
   ConnectionConfig,
   ConnectionInput,
@@ -12,6 +12,9 @@ import type {
 import type { ConnectionStore } from './store/connection-store'
 import type { QuickCommandStore } from './store/quick-command-store'
 import type { SessionManager } from './ssh/session-manager'
+import type { VncManager } from './vnc/manager'
+import { probeVnc } from './vnc/manager'
+import type { VncOpenRequest, VncProbeInput, VncProbeResult, VncSessionInfo } from '../shared/types'
 import { diagnose } from './ssh/diagnose'
 
 /** 主进程事件统一从这里推给渲染进程，避免散落各处的 webContents.send */
@@ -25,13 +28,17 @@ export function registerIpc(
   store: ConnectionStore,
   quick: QuickCommandStore,
   sessions: SessionManager,
+  vnc: VncManager,
   getWindow: () => BrowserWindow | null
 ): void {
   ipcMain.handle('conn:list', (): ConnectionConfig[] => store.list())
 
   ipcMain.handle('conn:save', (_e, input: ConnectionInput): Promise<ConnectionConfig> => {
     if (!input.host?.trim()) throw new Error('主机地址不能为空')
-    if (!input.username?.trim()) throw new Error('用户名不能为空')
+    // 远程桌面不需要用户名，只有 SSH 才校验
+    if ((input.kind ?? 'ssh') === 'ssh' && !input.username?.trim()) {
+      throw new Error('用户名不能为空')
+    }
     return store.upsert(input)
   })
 
@@ -108,6 +115,48 @@ export function registerIpc(
   ipcMain.on('zmodem:cancel', (_e, sessionId: string) => {
     sessions.cancelZmodem(sessionId)
   })
+
+  // ---------- 远程桌面（VNC） ----------
+
+  ipcMain.handle('vnc:open', async (_e, req: VncOpenRequest): Promise<VncSessionInfo> => {
+    const conn = store.get(req.connectionId)
+    if (!conn) throw new Error('连接配置不存在，可能已被删除')
+    const password = req.password ?? (await store.getSecret(conn.id))
+    return vnc.open(conn, password)
+  })
+
+  ipcMain.handle('vnc:close', (_e, sessionId: string) => {
+    vnc.close(sessionId)
+  })
+
+  ipcMain.on('vnc:pointer', (_e, sessionId: string, x: number, y: number, mask: number) => {
+    vnc.pointer(sessionId, x, y, mask)
+  })
+
+  ipcMain.on('vnc:key', (_e, sessionId: string, keysym: number, down: boolean) => {
+    vnc.key(sessionId, keysym, down)
+  })
+
+  ipcMain.on('vnc:clipboard', (_e, sessionId: string, text: string) => {
+    vnc.clipboard(sessionId, text)
+  })
+
+  ipcMain.on('vnc:paste', (_e, sessionId: string) => {
+    // Electron 45 起剪贴板读取是异步的，包一层并把异常吞掉（读不到就没什么可粘的）
+    void Promise.resolve(clipboard.readText())
+      .then((text) => vnc.clipboard(sessionId, text))
+      .catch(() => undefined)
+  })
+
+  ipcMain.on('vnc:refresh', (_e, sessionId: string) => {
+    vnc.refresh(sessionId)
+  })
+
+  ipcMain.on('vnc:active', (_e, sessionId: string, active: boolean) => {
+    vnc.setActive(sessionId, active)
+  })
+
+  ipcMain.handle('vnc:probe', (_e, input: VncProbeInput): Promise<VncProbeResult> => probeVnc(input))
 
   // ---------- 快捷命令 ----------
 

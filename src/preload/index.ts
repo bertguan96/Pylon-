@@ -23,6 +23,17 @@ const api: BridgeApi = {
     ack: (sessionId, bytes) => ipcRenderer.send('session:ack', sessionId, bytes),
     cancelZmodem: (sessionId) => ipcRenderer.send('zmodem:cancel', sessionId)
   },
+  vnc: {
+    open: (req) => ipcRenderer.invoke('vnc:open', req),
+    close: (sessionId) => ipcRenderer.invoke('vnc:close', sessionId),
+    pointer: (sessionId, x, y, mask) => ipcRenderer.send('vnc:pointer', sessionId, x, y, mask),
+    key: (sessionId, keysym, down) => ipcRenderer.send('vnc:key', sessionId, keysym, down),
+    clipboard: (sessionId, text) => ipcRenderer.send('vnc:clipboard', sessionId, text),
+    paste: (sessionId) => ipcRenderer.send('vnc:paste', sessionId),
+    setActive: (sessionId, active) => ipcRenderer.send('vnc:active', sessionId, active),
+    refresh: (sessionId) => ipcRenderer.send('vnc:refresh', sessionId),
+    probe: (input) => ipcRenderer.invoke('vnc:probe', input)
+  },
   quickCommands: {
     list: () => ipcRenderer.invoke('quick:list'),
     save: (input) => ipcRenderer.invoke('quick:save', input),

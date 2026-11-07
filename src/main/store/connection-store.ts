@@ -124,12 +124,15 @@ export class ConnectionStore {
       }
     }
 
+    const kind = input.kind === 'vnc' ? 'vnc' : 'ssh'
     const record: ConnectionConfig = {
       id,
+      kind,
       name: input.name.trim() || input.host,
       host: input.host.trim(),
-      port: input.port || 22,
-      username: input.username.trim(),
+      port: input.port || (kind === 'vnc' ? 5900 : 22),
+      // 远程桌面没有用户名这个概念，留着空串而不是 undefined，省得下游到处判空
+      username: input.username?.trim() ?? '',
       authType: input.authType,
       privateKeyPath: input.privateKeyPath || undefined,
       group: input.group?.trim() || undefined,

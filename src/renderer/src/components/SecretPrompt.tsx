@@ -22,11 +22,17 @@ export default function SecretPrompt({ connection, onSubmit, onClose }: Props) {
         <div className="modal-head">连接到 {connection.name}</div>
         <div className="modal-body">
           <div className="hint">
-            {connection.username}@{connection.host}:{connection.port}
+            {connection.kind === 'vnc'
+              ? `${connection.host}:${connection.port} · 远程桌面`
+              : `${connection.username}@${connection.host}:${connection.port}`}
           </div>
           <div className="field">
             <label className="field-label">
-              {connection.authType === 'privateKey' ? '私钥口令' : '密码'}
+              {connection.kind === 'vnc'
+                ? 'VNC 密码'
+                : connection.authType === 'privateKey'
+                  ? '私钥口令'
+                  : '密码'}
             </label>
             <input
               type="password"

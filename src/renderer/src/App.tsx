@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ConnectionConfig, QuickCommand, SessionStatus, ZmodemState } from '../../shared/types'
+import type {
+  ConnectionConfig,
+  ConnectionKind,
+  QuickCommand,
+  SessionStatus,
+  VncStats,
+  ZmodemState
+} from '../../shared/types'
 import { LOCAL_CONNECTION_ID } from '../../shared/types'
 import Sidebar from './components/Sidebar'
 import ConnectionDialog from './components/ConnectionDialog'
@@ -15,12 +22,16 @@ import {
 import { cleanError } from './lib/ipc-error'
 
 import TerminalPane from './components/TerminalPane'
+import RemoteDesktopPane from './components/RemoteDesktopPane'
+import { dispatchRemote } from './lib/remote-registry'
 
 interface UiTab {
   tabId: string
   /** 建连成功前为 null；断线重连后会换新值，但 tabId 不变 */
   sessionId: string | null
   connectionId: string
+  /** ssh = 终端；vnc = 远程桌面 */
+  kind: ConnectionKind
   title: string
   host: string
   status: SessionStatus
@@ -49,6 +60,9 @@ export default function App() {
   const [quickOpen, setQuickOpen] = useState(false)
   /** rz / sz 传输进度，按 sessionId 归类 */
   const [transfers, setTransfers] = useState<Record<string, ZmodemState>>({})
+  /** 远程桌面的分辨率与实时帧率，按 sessionId 归类 */
+  const [vncInfo, setVncInfo] = useState<Record<string, { width: number; height: number; name: string }>>({})
+  const [vncStats, setVncStats] = useState<Record<string, VncStats>>({})
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([])
 
   const tabsRef = useRef<UiTab[]>([])
@@ -98,6 +112,7 @@ export default function App() {
             tabId,
             sessionId: null,
             connectionId: conn.id,
+            kind: 'ssh',
             title: conn.name,
             host: conn.host,
             status: 'connecting'
@@ -130,16 +145,52 @@ export default function App() {
     [updateTab]
   )
 
+  /** 远程桌面：走 VNC 通道，不涉及 PTY，也不需要终端尺寸 */
+  const startVncSession = useCallback(
+    async (conn: ConnectionConfig, password: string | undefined, existingTabId?: string) => {
+      const tabId = existingTabId ?? uid()
+
+      if (existingTabId) {
+        updateTab(tabId, { status: 'connecting', error: undefined, sessionId: null })
+      } else {
+        setTabs((prev) => [
+          ...prev,
+          {
+            tabId,
+            sessionId: null,
+            connectionId: conn.id,
+            kind: 'vnc',
+            title: conn.name,
+            host: conn.host,
+            status: 'connecting'
+          }
+        ])
+        setActiveTabId(tabId)
+      }
+
+      try {
+        const info = await window.api.vnc.open({ connectionId: conn.id, password })
+        updateTab(tabId, { sessionId: info.sessionId, status: 'connected', title: conn.name })
+      } catch (err) {
+        updateTab(tabId, { status: 'error', error: cleanError(err) })
+      }
+    },
+    [updateTab]
+  )
+
   const handleConnect = useCallback(
     (conn: ConnectionConfig) => {
-      const needSecret = conn.authType !== 'agent' && !conn.hasSecret
+      const kind = conn.kind ?? 'ssh'
+      // 远程桌面没有 agent 认证，只要有密码就能连
+      const needSecret = kind === 'vnc' ? !conn.hasSecret : conn.authType !== 'agent' && !conn.hasSecret
       if (needSecret) {
         setSecretPrompt({ conn })
         return
       }
-      void startSession(conn, undefined)
+      if (kind === 'vnc') void startVncSession(conn, undefined)
+      else void startSession(conn, undefined)
     },
-    [startSession]
+    [startSession, startVncSession]
   )
 
   /** 本机终端：不查连接配置、不弹密码，直接开一个本地 shell 标签 */
@@ -156,6 +207,7 @@ export default function App() {
             tabId,
             sessionId: null,
             connectionId: LOCAL_CONNECTION_ID,
+            kind: 'ssh',
             title: '本机终端',
             host: 'localhost',
             status: 'connecting'
@@ -194,21 +246,27 @@ export default function App() {
       }
       const conn = connectionsRef.current.find((c) => c.id === tab.connectionId)
       if (!conn) return
-      const needSecret = conn.authType !== 'agent' && !conn.hasSecret
+      const kind = conn.kind ?? 'ssh'
+      const needSecret = kind === 'vnc' ? !conn.hasSecret : conn.authType !== 'agent' && !conn.hasSecret
       if (needSecret) {
         setSecretPrompt({ conn, tabId: tab.tabId })
         return
       }
-      void startSession(conn, undefined, tab.tabId)
+      if (kind === 'vnc') void startVncSession(conn, undefined, tab.tabId)
+      else void startSession(conn, undefined, tab.tabId)
     },
-    [startSession, startLocalSession]
+    [startSession, startLocalSession, startVncSession]
   )
 
   const closeTab = useCallback(async (tabId: string) => {
     const list = tabsRef.current
     const target = list.find((t) => t.tabId === tabId)
     if (target?.sessionId) {
-      await window.api.session.close(target.sessionId).catch(() => undefined)
+      const closing =
+        target.kind === 'vnc'
+          ? window.api.vnc.close(target.sessionId)
+          : window.api.session.close(target.sessionId)
+      await closing.catch(() => undefined)
     }
     const idx = list.findIndex((t) => t.tabId === tabId)
     const next = list.filter((t) => t.tabId !== tabId)
@@ -248,6 +306,29 @@ export default function App() {
   // 主进程事件订阅只注册一次
   useEffect(() => {
     return window.api.onEvent((evt) => {
+      // ---- 远程桌面
+      if (evt.type === 'vnc:init') {
+        setVncInfo((prev) => ({
+          ...prev,
+          [evt.sessionId]: { width: evt.width, height: evt.height, name: evt.name }
+        }))
+        dispatchRemote(evt)
+        return
+      }
+      if (evt.type === 'vnc:rects' || evt.type === 'vnc:clipboard') {
+        dispatchRemote(evt)
+        return
+      }
+      if (evt.type === 'vnc:stats') {
+        setVncStats((prev) => ({ ...prev, [evt.sessionId]: evt.stats }))
+        return
+      }
+      if (evt.type === 'vnc:status') {
+        const tab = tabsRef.current.find((t) => t.sessionId === evt.sessionId)
+        if (tab) updateTab(tab.tabId, { status: evt.status, error: evt.error })
+        return
+      }
+
       if (evt.type === 'zmodem:update') {
         const state = evt.state
         setTransfers((prev) => ({ ...prev, [state.sessionId]: state }))
@@ -311,6 +392,8 @@ export default function App() {
   const activeConnection = activeTab
     ? connections.find((c) => c.id === activeTab.connectionId)
     : undefined
+  const activeVncInfo = activeTab?.sessionId ? vncInfo[activeTab.sessionId] : undefined
+  const activeVncStats = activeTab?.sessionId ? vncStats[activeTab.sessionId] : undefined
 
   return (
     <div className="app">
@@ -406,11 +489,18 @@ export default function App() {
                 key={tab.tabId}
                 className={`pane ${tab.tabId === activeTabId ? 'active' : ''}`}
               >
-                <TerminalPane
-                  tabId={tab.tabId}
-                  sessionId={tab.sessionId}
-                  active={tab.tabId === activeTabId}
-                />
+                {tab.kind === 'vnc' ? (
+                  <RemoteDesktopPane
+                    sessionId={tab.sessionId}
+                    active={tab.tabId === activeTabId}
+                  />
+                ) : (
+                  <TerminalPane
+                    tabId={tab.tabId}
+                    sessionId={tab.sessionId}
+                    active={tab.tabId === activeTabId}
+                  />
+                )}
               </div>
             ))}
 
@@ -436,7 +526,9 @@ export default function App() {
         {quickOpen && (
           <QuickCommandPanel
             commands={quickCommands}
-            canSend={!!activeTab?.sessionId && activeTab.status === 'connected'}
+            canSend={
+              activeTab?.kind !== 'vnc' && !!activeTab?.sessionId && activeTab.status === 'connected'
+            }
             onClose={() => setQuickOpen(false)}
             onSend={handleQuickSend}
             onReload={reloadQuickCommands}
@@ -449,9 +541,33 @@ export default function App() {
         {activeConnection && (
           <>
             <span className="sep" />
-            <span>
-              {activeConnection.username}@{activeConnection.host}:{activeConnection.port}
-            </span>
+            {activeTab?.kind === 'vnc' ? (
+              <>
+                <span>
+                  {activeConnection.host}:{activeConnection.port} · VNC
+                </span>
+                {activeVncInfo && (
+                  <>
+                    <span className="sep" />
+                    <span>
+                      {activeVncInfo.width}×{activeVncInfo.height}
+                    </span>
+                  </>
+                )}
+                {activeVncStats && (
+                  <>
+                    <span className="sep" />
+                    <span>
+                      {activeVncStats.fps} fps · {activeVncStats.kbps} kbps
+                    </span>
+                  </>
+                )}
+              </>
+            ) : (
+              <span>
+                {activeConnection.username}@{activeConnection.host}:{activeConnection.port}
+              </span>
+            )}
             <span className="sep" />
             <span>{statusText(activeTab?.status)}</span>
           </>
@@ -486,7 +602,11 @@ export default function App() {
           onSubmit={(secret) => {
             const pending = secretPrompt
             setSecretPrompt(null)
-            void startSession(pending.conn, secret, pending.tabId)
+            if ((pending.conn.kind ?? 'ssh') === 'vnc') {
+              void startVncSession(pending.conn, secret, pending.tabId)
+            } else {
+              void startSession(pending.conn, secret, pending.tabId)
+            }
           }}
         />
       )}
