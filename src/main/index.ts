@@ -11,6 +11,7 @@ import { maybeRunLocalProbe } from './dev/local-probe'
 import { maybeRunZmodemProbe } from './dev/zmodem-probe'
 import { maybeRunZmodemE2E } from './dev/zmodem-e2e'
 import { maybeRunVncProbe } from './dev/vnc-probe'
+import { maybeRunVncLive } from './dev/vnc-live'
 import { VncManager } from './vnc/manager'
 import type { MainEvent } from '../shared/types'
 
@@ -154,6 +155,8 @@ app.whenReady().then(async () => {
   maybeRunZmodemE2E()
   // 远程桌面自测：VNC_PROBE=1 时起一个假 RFB 服务端，跑完退出
   maybeRunVncProbe()
+  // 远程桌面真机诊断：VNC_LIVE=主机:端口:密码 时对真实服务端跑握手/认证/首帧，跑完退出
+  maybeRunVncLive()
 
   if (process.env.DEMO_SEED) {
     const exists = store.list().some((c) => c.host === '127.0.0.1' && c.port === 2222)

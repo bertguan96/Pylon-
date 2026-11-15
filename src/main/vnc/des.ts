@@ -43,22 +43,30 @@ export function vncAuthResponse(challenge: Buffer, password: string): Buffer {
 
   // 8 字节以内有效；VNC 协议本身只认前 8 个字节
   const raw = Buffer.from(password, 'utf8').subarray(0, 8)
-  const key = Buffer.alloc(16)
+  const key = Buffer.alloc(8)
   for (let i = 0; i < 8; i++) {
     // 缺的位补 0，然后整字节倒序
     key[i] = reverseBits(i < raw.length ? raw[i] : 0)
   }
 
+  // 同一把密钥加密挑战的两半（ECB 下两块互不干扰）。
+  // 曾经在这里栽过：分配 16 字节只填前 8 字节，后半段挑战等于用全零密钥加密，
+  // 自写假服务端发现不了（校验用的同一个函数），真机 Apple 服务端直接拒了。
   return Buffer.concat([
-    desEncryptBlock(key.subarray(0, 8), challenge.subarray(0, 8)),
-    desEncryptBlock(key.subarray(8, 16), challenge.subarray(8, 16))
+    desEncryptBlock(key, challenge.subarray(0, 8)),
+    desEncryptBlock(key, challenge.subarray(8, 16))
   ])
 }
 
 /**
- * 用 DES 标准测试向量自查一遍。
+ * 自查。两层：
  *
- * 密钥 0123456789ABCDEF、明文 "Now is t" 的密文是公开标准值。
+ * 1. desEncryptBlock 对公开标准向量（密钥 0123456789ABCDEF、明文 "Now is t"）；
+ * 2. vncAuthResponse 对固定向量（挑战 16 个 0x00、密码 "12345678"）——
+ *    这个值是与独立的第三方 DES 实现（des.js）比对得出的，专防「派生规则错但
+ *    块加密对」这类 bug：正是这种 bug 曾让后半段挑战用全零密钥加密，
+ *    自写假服务端发现不了（校验用的同一个函数），真机直接认证失败。
+ *
  * 换 Node / Electron 版本后如果底层把 DES 拿掉了，这里会第一个炸出来，
  * 而不是等到用户连 Mac 时看到一句「密码错误」。
  */
@@ -67,8 +75,13 @@ export function desSelfTest(): boolean {
   const plain = Buffer.from('4e6f772069732074', 'hex')
   const expected = '3fa40e8a984d4815'
   try {
-    return desEncryptBlock(key, plain).toString('hex') === expected
+    if (desEncryptBlock(key, plain).toString('hex') !== expected) return false
+    const zero = Buffer.alloc(16)
+    return vncAuthResponse(zero, '12345678').toString('hex') === VNC_AUTH_VECTOR
   } catch {
     return false
   }
 }
+
+/** 挑战 = 16×0x00、密码 = "12345678" 时的标准应答（与独立实现 des.js 对 500 组随机样本比对得出） */
+const VNC_AUTH_VECTOR = 'd29f6e7f0456f8ded29f6e7f0456f8de'
