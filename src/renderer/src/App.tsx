@@ -310,7 +310,8 @@ export default function App() {
       if (evt.type === 'vnc:init') {
         setVncInfo((prev) => ({
           ...prev,
-          [evt.sessionId]: { width: evt.width, height: evt.height, name: evt.name }
+          // 状态栏报远端真实分辨率；evt.width/height 是降采样后的画布尺寸
+          [evt.sessionId]: { width: evt.remoteWidth, height: evt.remoteHeight, name: evt.name }
         }))
         dispatchRemote(evt)
         return

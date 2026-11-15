@@ -219,6 +219,12 @@ const server = net.createServer((socket) => {
       const type = (await read(1))[0]
       if (type === 3) {
         const incremental = (await read(9))[0]
+        // SILENT=1：收下请求但一帧都不回，模拟 Mac 熄屏后屏幕共享挂起的样子。
+        // 用来验证客户端的看门狗会不会把「请求石沉大海」和「画面没变化」区分开。
+        if (process.env.SILENT === '1') {
+          log({ evt: 'request-swallowed', incremental })
+          continue
+        }
         if (!incremental) sendFull()
         else await sendDelta()
       } else if (type === 0) {

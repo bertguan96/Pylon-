@@ -231,7 +231,11 @@ class MockRfbServer {
   private stream: ByteStream | null = null
   private frame = 0
 
-  constructor(private readonly securityTypes: number[] = [2, 1]) {}
+  constructor(
+    private readonly securityTypes: number[] = [2, 1],
+    /** 吞掉所有帧请求：模拟 Mac 熄屏后屏幕共享挂起（TCP 还在，就是一帧不发） */
+    private readonly mute = false
+  ) {}
 
   async start(): Promise<number> {
     this.server.on('connection', (socket) => {
@@ -306,7 +310,7 @@ class MockRfbServer {
         const incremental = await stream.u8()
         await stream.skip(8)
         this.requests.push({ incremental })
-        void this.respond()
+        if (!this.mute) void this.respond()
       } else if (type === 4) {
         const down = await stream.u8()
         await stream.skip(2)
@@ -655,10 +659,10 @@ async function run(): Promise<void> {
     {
       const codec565 = new PixelCodec(PIXEL_FORMAT_RGB565)
       // 纯色 tile：sub=1 + 一个 CPIXEL（小端 0xF800 = 纯红）
-      const red = decodeZrleTiles(Buffer.from([1, 0x00, 0xf8]), 0, 0, 1, 1, codec565)
+      const red = await decodeZrleTiles(Buffer.from([1, 0x00, 0xf8]), 0, 0, 1, 1, codec565)
       // 0x07E0 = 纯绿（g=63），0x001F = 纯蓝
-      const green = decodeZrleTiles(Buffer.from([1, 0xe0, 0x07]), 0, 0, 1, 1, codec565)
-      const blue = decodeZrleTiles(Buffer.from([1, 0x1f, 0x00]), 0, 0, 1, 1, codec565)
+      const green = await decodeZrleTiles(Buffer.from([1, 0xe0, 0x07]), 0, 0, 1, 1, codec565)
+      const blue = await decodeZrleTiles(Buffer.from([1, 0x1f, 0x00]), 0, 0, 1, 1, codec565)
       const rgba = (r: VncRect) => `${r.data[0]},${r.data[1]},${r.data[2]},${r.data[3]}`
       check(
         '16 位色 CPIXEL 为 2 字节，RGB565 三原色解码正确',
@@ -763,6 +767,46 @@ async function run(): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     check('空端口给出「拒绝连接」提示', msg.includes('拒绝连接'), msg.slice(0, 50))
+  }
+
+  // ---- 看门狗：服务端收下请求却一帧不回（Mac 熄屏后就是这个样子）。
+  // 这里最怕的是「看不出异常」：socket 还在，请求也发出去了，只是永远没有响应。
+  // 没有看门狗的话 inFlight 永远归不了零，画面就永久冻在那儿 —— 用户说的「卡死」。
+  {
+    const muteServer = new MockRfbServer([2, 1], true)
+    const mutePort = await muteServer.start()
+    const state: { closed: Error | null | undefined; rects: number } = { closed: undefined, rects: 0 }
+    const muteClient = new VncClient({
+      host: '127.0.0.1',
+      port: mutePort,
+      password: PASSWORD,
+      onRects: () => {
+        state.rects++
+      },
+      onClose: (err) => {
+        state.closed = err ?? null
+      }
+    })
+
+    try {
+      await muteClient.connect()
+      // 持续输入：看门狗只在「有输入却收不到帧」时才判定停摆，
+      // 静止桌面本来就不该有帧，不能误杀
+      const input = setInterval(() => muteClient.pointer(80 + Math.random() * 300, 60, 0), 120)
+      const ended = await waitFor(() => state.closed !== undefined, 9000)
+      clearInterval(input)
+
+      check(
+        '服务端只收不回时，看门狗主动收尾而不是永久冻住',
+        ended && state.closed instanceof Error,
+        ended
+          ? `原因：${state.closed instanceof Error ? state.closed.message : '正常关闭（不该这样）'}`
+          : '9 秒内没有任何收尾动作'
+      )
+    } finally {
+      muteClient.close()
+      await muteServer.stop()
+    }
   }
 
   console.log(`===== ${passed}/${passed + failed} 通过 =====`)

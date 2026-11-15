@@ -30,13 +30,20 @@ import {
   PixelCodec,
   ZrleDecoder,
   decodeCopyRect,
-  decodeRaw
+  decodeRaw,
+  downscaleRect
 } from './decoders'
 import { vncAuthResponse } from './des'
 
 export interface VncInitInfo {
+  /** 渲染位图尺寸，可能已经按 scale 降采样 */
   width: number
   height: number
+  /** 远端真实像素尺寸：鼠标坐标要换算到这个空间 */
+  remoteWidth: number
+  remoteHeight: number
+  /** 降采样倍数，1 表示原始像素 */
+  scale: number
   name: string
 }
 
@@ -65,6 +72,15 @@ const REFRESH_IDLE_MS = 900
 /** 流水线深度：同时在服务端挂着的 FramebufferUpdateRequest 数 */
 const MAX_IN_FLIGHT = 2
 
+/** 判定停摆：有用户输入、却这么久没收到任何帧 */
+const STALL_MS = 1400
+
+/** 连续停摆这么多次就认定连接已废，直接报错让用户重连，别无限重试 */
+const STALL_GIVEUP = 3
+
+/** 握手完成后多久还没收到第一帧就判定异常（Retina 全屏首帧正常要 1.5~3 秒） */
+const FIRST_FRAME_MS = 6000
+
 /**
  * 两次 FramebufferUpdateRequest 之间的最小间隔。
  *
@@ -82,9 +98,13 @@ export class VncClient {
   private socket: Socket | null = null
   private stream: ByteStream | null = null
   private fb: Framebuffer | null = null
+  /** 输出缓冲：降采样空间（scale=1 时与 fb 是同一个对象） */
+  private outFb: Framebuffer | null = null
   private codec: PixelCodec = new PixelCodec(PIXEL_FORMAT_RGBA32)
   private zrle: ZrleDecoder | null = null
   private useZrle = true
+  /** 渲染降采样倍数：1 = 原始像素，2 = 长宽各减半 */
+  private scale = 1
 
   private closed = false
   private active = true
@@ -102,9 +122,30 @@ export class VncClient {
   private statsEncodings = new Map<number, { count: number; pixels: number }>()
   /** 单帧解码（解压 + tile 还原）的最长耗时，毫秒 */
   private statsDecodeMs = 0
+  /** 单帧从收到字节到交给渲染层的总耗时（解码 + 比对 + 降采样），毫秒 */
+  private statsFrameMs = 0
+  /** 贴图段的纯 CPU 耗时（blit + 降采样 + 比对），不含任何网络等待 */
+  private statsBlitMs = 0
 
   /** 上一次握手时对端给出的认证方式，探测报告里用得上 */
   securityTypes: number[] = []
+
+  /** 最近一次收到完整帧的时间 */
+  private lastFrameAt = 0
+  /** 最近一次用户输入（指针/键盘）的时间 */
+  private lastInputAt = 0
+  /**
+   * 「有输入但一直等不到帧」的起点；0 表示当前没在等。
+   *
+   * 不直接用 lastInputAt 是为了避开两个误判：静态画面放很久之后动一下鼠标，
+   * 距今没帧的时长早就超过阈值，用 lastInputAt 会立刻误报；而持续移动鼠标时
+   * lastInputAt 一直在刷新，用「距今多久没输入」又永远不触发。记一个起点最稳。
+   */
+  private stallSince = 0
+  /** 连续判定停摆的次数，收到帧后清零 */
+  private stallCount = 0
+  /** 握手完成的时间点，用来兜住「连上了但一张图都没有」 */
+  private connectedAt = 0
 
   constructor(options: Options) {
     this.options = options
@@ -197,8 +238,34 @@ export class VncClient {
       throw new Error('对端使用调色板模式，本客户端只支持真彩色（现代服务端不会走到这里）')
     }
 
+    const info = this.afterInit(width, height, name)
+    this.options.onInit?.(info)
+    return info
+  }
+
+  /** ServerInit 之后的收尾：决定渲染精度、下发像素格式与编码表 */
+  private afterInit(width: number, height: number, name: string): VncInitInfo {
+    /**
+     * 渲染精度。
+     *
+     * Retina 屏报的是物理像素（2940×1912），而画布通常只有一千像素宽 ——
+     * 每帧多出来的三倍细节既传不过去也看不见，却是 IPC 和 canvas 上传的大头。
+     * 2 倍降采样后内容量降到 1/4，Retina 上肉眼几乎无差（2x 本来就是为了
+     * 让人眼做平均的）。1080p 级别的屏不降，避免文字发虚。
+     */
+    const forced = Number(process.env.VNC_SCALE) || 0
+    this.scale =
+      this.options.quality === 'sharp' ? 1 : forced || (width >= 2400 ? 2 : 1)
+
     this.fb = new Framebuffer(width, height)
     this.zrle = new ZrleDecoder()
+    this.connectedAt = Date.now()
+    // 输出缓冲按降采样后的尺寸建：比对和交给渲染层的都在这个空间里做，
+    // 数据量只有原始像素的 1/(scale²)，比对耗时直接降一个数量级
+    this.outFb =
+      this.scale > 1
+        ? new Framebuffer(Math.floor(width / this.scale), Math.floor(height / this.scale))
+        : this.fb
 
     // 统一像素格式，省掉解码时的位运算（详见 PIXEL_FORMAT_RGBA32 的注释）
     const fmt = Buffer.alloc(20)
@@ -209,9 +276,14 @@ export class VncClient {
     this.write(fmt)
     this.sendEncodings()
 
-    const info = { width, height, name }
-    this.options.onInit?.(info)
-    return info
+    return {
+      width: Math.floor(width / this.scale),
+      height: Math.floor(height / this.scale),
+      remoteWidth: width,
+      remoteHeight: height,
+      scale: this.scale,
+      name
+    }
   }
 
   private async security38(): Promise<void> {
@@ -339,17 +411,66 @@ export class VncClient {
           return `${name}×${r.count}(${(r.pixels / 1e6).toFixed(2)}MP)`
         })
         console.log(
-          `[vnc] ${fps}fps ${kbps}kbps | ${parts.join(' ')} | 解码最长 ${this.statsDecodeMs.toFixed(0)}ms`
+          `[vnc] ${fps}fps ${kbps}kbps | ${parts.join(' ')} | 解码最长 ${this.statsDecodeMs.toFixed(0)}ms · 帧处理最长 ${this.statsFrameMs.toFixed(0)}ms · 贴图段 ${this.statsBlitMs.toFixed(0)}ms`
         )
         this.statsEncodings.clear()
         this.statsDecodeMs = 0
+        this.statsFrameMs = 0
+        this.statsBlitMs = 0
       }
     }, 1000)
 
-    // 服务端偶尔会漏掉一次响应（尤其 Wi-Fi 抖动时），补一个请求避免画面停住
+    // 看门狗。
+    //
+    // RFB 里「请求挂着没回」有两层含义：正常情况是无变化，服务端压着请求不回；
+    // 异常情况是请求石沉大海（服务端挂起、Wi-Fi 丢包），此时 inFlight 永远不归零，
+    // 队列被堵死，画面就永久冻在那儿 —— 用户看到的就是「卡死」。
+    //
+    // 区分两者的判据是「有没有输入」：用户一动鼠标/键盘，画面必然变，服务端就该回帧。
+    // 所以只有在「有输入 且 超过 STALL_MS 没有任何帧」时才判定停摆，清零计数重发整帧。
+    // 静止桌面不会误判（那时没有输入），也不会白跑流量。
     this.refreshTimer = setInterval(() => {
       if (this.closed || !this.active) return
-      if (Date.now() - this.lastRequestAt > REFRESH_IDLE_MS) this.requestUpdate(true)
+      const now = Date.now()
+
+      // 首帧还没到：一帧都没有的情况下谈不上「等不到新帧」，只兜一个总超时。
+      // Retina 全屏首帧要 1.5~3 秒是正常的，超过 FIRST_FRAME_MS 还没影才是异常。
+      if (this.lastFrameAt === 0) {
+        if (this.connectedAt > 0 && now - this.connectedAt > FIRST_FRAME_MS) {
+          this.finish(new Error('连上了但迟迟收不到画面，远端可能已经休眠或屏幕共享被暂停'))
+        }
+        return
+      }
+
+      // 判据：用户动过鼠标/键盘（起了一个等待点），却在 STALL_MS 内始终等不到帧。
+      // 静止桌面不会起这个点，所以不会误杀；持续输入也不会像「距今多久没输入」
+      // 那样永远不触发 —— 起点只在收到帧或主动重置时才清零。
+      //
+      // lastFrameAt > 0 是必须的：首帧要走完一整屏编码，Retina 上 1.5~3 秒很常见，
+      // 这段时间还没有任何帧可以「等不到」，判停摆会纯属误伤。
+      const stalled =
+        this.lastFrameAt > 0 &&
+        this.inFlight > 0 &&
+        this.stallSince > 0 &&
+        now - this.stallSince > STALL_MS
+      if (stalled) {
+        this.stallCount++
+        if (this.stallCount >= STALL_GIVEUP) {
+          this.finish(new Error('远端长时间没有画面更新，连接可能已经断开'))
+          return
+        }
+        console.warn(
+          `[vnc] 请求停摆 ${((now - this.lastFrameAt) / 1000).toFixed(1)}s，清空在飞请求后重发整帧（第 ${this.stallCount} 次）`
+        )
+        this.inFlight = 0
+        this.requestQueue = []
+        this.stallSince = now // 重新计时，别让下一个 tick 立刻又判一次
+        this.requestUpdate(false)
+        return
+      }
+
+      // 长时间没有任何往来，补一个增量探测连接是否还活着
+      if (now - this.lastRequestAt > REFRESH_IDLE_MS) this.requestUpdate(true)
     }, 500)
   }
 
@@ -445,12 +566,27 @@ export class VncClient {
           throw new Error(`服务端使用了未协商的编码 ${encoding}`)
       }
 
-      fb.blit(rect)
-      rects.push(rect)
+      // 按 64×64 块比对，只把真正变化的块交给渲染进程 —— 服务端整屏重传时
+      // 实际变化往往只占一小块，省下的是 22MB 级的 IPC 序列化与 canvas 上传
+      const tBlit = performance.now()
+      const outFb = this.outFb ?? fb
+      if (this.scale > 1) {
+        // 原始 fb 必须始终跟着更新：CopyRect 要从里面取源像素
+        fb.blit(rect)
+        outFb.blitDirty(downscaleRect(rect, this.scale), rects)
+      } else {
+        outFb.blitDirty(rect, rects)
+      }
+      this.statsBlitMs = Math.max(this.statsBlitMs, performance.now() - tBlit)
     }
 
     this.statsFrames++
+    this.lastFrameAt = Date.now()
+    this.stallCount = 0
+    this.stallSince = 0
+
     if (rects.length > 0) this.options.onRects?.(rects)
+    this.statsFrameMs = Math.max(this.statsFrameMs, performance.now() - tDecode)
     this.requestUpdate(true)
   }
 
@@ -541,6 +677,8 @@ export class VncClient {
 
   pointer(x: number, y: number, mask: number): void {
     if (this.closed) return
+    this.lastInputAt = Date.now()
+    if (this.stallSince === 0) this.stallSince = this.lastInputAt
     const buf = Buffer.alloc(6)
     buf[0] = 5 // PointerEvent
     buf[1] = mask & 0xff
@@ -551,6 +689,8 @@ export class VncClient {
 
   key(keysym: number, down: boolean): void {
     if (this.closed) return
+    this.lastInputAt = Date.now()
+    if (this.stallSince === 0) this.stallSince = this.lastInputAt
     const buf = Buffer.alloc(8)
     buf[0] = 4 // KeyEvent
     buf[1] = down ? 1 : 0

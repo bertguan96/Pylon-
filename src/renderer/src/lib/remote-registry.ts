@@ -8,9 +8,22 @@
 
 import type { MainEvent, VncRect } from '../../../shared/types'
 
+/** ServerInit 里我们关心的部分：画多大、坐标要换算到多大 */
+export interface RemoteInit {
+  /** 渲染位图尺寸，可能已经降采样 */
+  width: number
+  height: number
+  /** 远端真实像素尺寸，鼠标坐标按它换算 */
+  remoteWidth: number
+  remoteHeight: number
+  /** 降采样倍数 */
+  scale: number
+  name: string
+}
+
 export interface RemoteHandlers {
   /** 收到 ServerInit 或重连后的整屏尺寸 */
-  init?: (width: number, height: number, name: string) => void
+  init?: (info: RemoteInit) => void
   /** 一次 FramebufferUpdate 里的所有矩形，已经解码成 RGBA */
   rects?: (rects: VncRect[]) => void
   /** 远端剪贴板 */
@@ -24,14 +37,14 @@ const handlers = new Map<string, RemoteHandlers>()
  * 那时候还没有谁认领这个 sessionId。尺寸信息很小，先存着，等面板注册时补发。
  * 帧数据不缓存 —— 面板注册后会主动向主进程要一整帧，比留一堆过期帧干净。
  */
-const pendingInit = new Map<string, { width: number; height: number; name: string }>()
+const pendingInit = new Map<string, RemoteInit>()
 
 export function registerRemote(sessionId: string, handler: RemoteHandlers): () => void {
   handlers.set(sessionId, handler)
   const early = pendingInit.get(sessionId)
   if (early) {
     pendingInit.delete(sessionId)
-    handler.init?.(early.width, early.height, early.name)
+    handler.init?.(early)
   }
   return () => {
     // 只有当前登记的还是自己时才删，避免重连后新面板的注册被旧面板的清理误删
@@ -42,9 +55,17 @@ export function registerRemote(sessionId: string, handler: RemoteHandlers): () =
 /** @returns 是否被某个面板消费掉了 */
 export function dispatchRemote(evt: MainEvent): boolean {
   if (evt.type === 'vnc:init') {
+    const init: RemoteInit = {
+      width: evt.width,
+      height: evt.height,
+      remoteWidth: evt.remoteWidth,
+      remoteHeight: evt.remoteHeight,
+      scale: evt.scale,
+      name: evt.name
+    }
     const handler = handlers.get(evt.sessionId)
-    if (handler?.init) handler.init(evt.width, evt.height, evt.name)
-    else pendingInit.set(evt.sessionId, { width: evt.width, height: evt.height, name: evt.name })
+    if (handler?.init) handler.init(init)
+    else pendingInit.set(evt.sessionId, init)
     return true
   }
   if (evt.type === 'vnc:rects') {

@@ -45,6 +45,9 @@ export class VncManager {
           sessionId,
           width: init.width,
           height: init.height,
+          remoteWidth: init.remoteWidth,
+          remoteHeight: init.remoteHeight,
+          scale: init.scale,
           name: init.name
         })
       },
@@ -77,8 +80,9 @@ export class VncManager {
       title: conn.name,
       host: conn.host,
       port: conn.port,
-      width: init.width,
-      height: init.height,
+      // 状态栏报远端真实分辨率：用户认的是 Mac 的屏幕尺寸，不是我们内部的降采样尺寸
+      width: init.remoteWidth,
+      height: init.remoteHeight,
       desktopName: init.name
     }
     this.sessions.set(sessionId, { client, info })

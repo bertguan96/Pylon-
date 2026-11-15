@@ -28,7 +28,10 @@ export default function RemoteDesktopPane({ sessionId, active }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null)
+  /** 画布位图尺寸（可能与远端不同：Retina 屏会降采样） */
   const ctxSize = useRef({ width: 0, height: 0 })
+  /** 远端真实像素尺寸：鼠标坐标换算的唯一依据 */
+  const remoteSize = useRef({ width: 0, height: 0 })
   const maskRef = useRef(0)
   const pendingRef = useRef<{ x: number; y: number } | null>(null)
   const rafRef = useRef(0)
@@ -42,7 +45,14 @@ export default function RemoteDesktopPane({ sessionId, active }: Props) {
    */
   const imageCache = useRef<{ image: ImageData; w: number; h: number } | null>(null)
 
-  const [info, setInfo] = useState<{ width: number; height: number; name: string } | null>(null)
+  const [info, setInfo] = useState<{
+    width: number
+    height: number
+    remoteWidth: number
+    remoteHeight: number
+    scale: number
+    name: string
+  } | null>(null)
   const [note, setNote] = useState('')
 
   useEffect(() => {
@@ -54,21 +64,23 @@ export default function RemoteDesktopPane({ sessionId, active }: Props) {
     if (!sessionId) return
 
     const off = registerRemote(sessionId, {
-      init: (width, height, name) => {
+      init: (init) => {
         const canvas = canvasRef.current
         if (!canvas) return
-        canvas.width = width
-        canvas.height = height
-        ctxSize.current = { width, height }
+        // 画布用「渲染尺寸」（可能已降采样），鼠标坐标换算用「远端尺寸」
+        canvas.width = init.width
+        canvas.height = init.height
+        ctxSize.current = { width: init.width, height: init.height }
+        remoteSize.current = { width: init.remoteWidth, height: init.remoteHeight }
         imageCache.current = null
         const ctx = canvas.getContext('2d', { alpha: false })
         ctxRef.current = ctx
         if (ctx) {
           // 第一帧到达前先铺个底色，避免闪白
           ctx.fillStyle = '#141414'
-          ctx.fillRect(0, 0, width, height)
+          ctx.fillRect(0, 0, init.width, init.height)
         }
-        setInfo({ width, height, name })
+        setInfo(init)
       },
       rects: (rects) => {
         const ctx = ctxRef.current
@@ -118,7 +130,7 @@ export default function RemoteDesktopPane({ sessionId, active }: Props) {
   /** 屏幕坐标 → 远端像素坐标 */
   const toRemote = useCallback((clientX: number, clientY: number) => {
     const canvas = canvasRef.current
-    const size = ctxSize.current
+    const size = remoteSize.current
     if (!canvas || size.width === 0) return null
     const rect = canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return null
@@ -232,7 +244,8 @@ export default function RemoteDesktopPane({ sessionId, active }: Props) {
 
       {info && (
         <div className="rd-foot">
-          {info.name || '远程桌面'} · {info.width}×{info.height} · {RESERVED_HINT}
+          {info.name || '远程桌面'} · {info.remoteWidth}×{info.remoteHeight}
+          {info.scale > 1 ? ` · ${info.scale >= 2 ? '半像素渲染' : ''}` : ''} · {RESERVED_HINT}
         </div>
       )}
 

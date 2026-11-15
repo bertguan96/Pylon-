@@ -181,7 +181,19 @@ export type MainEvent =
   | { type: 'session:exit'; sessionId: string; code: number | null }
   | { type: 'session:title'; sessionId: string; title: string }
   | { type: 'zmodem:update'; state: ZmodemState }
-  | { type: 'vnc:init'; sessionId: string; width: number; height: number; name: string }
+  | {
+      type: 'vnc:init'
+      sessionId: string
+      /** 渲染位图尺寸（可能已按 scale 降采样） */
+      width: number
+      height: number
+      /** 远端真实像素尺寸，鼠标坐标换算用 */
+      remoteWidth: number
+      remoteHeight: number
+      /** 降采样倍数 */
+      scale: number
+      name: string
+    }
   | { type: 'vnc:rects'; sessionId: string; rects: VncRect[] }
   | { type: 'vnc:status'; sessionId: string; status: SessionStatus; error?: string }
   | { type: 'vnc:clipboard'; sessionId: string; text: string }

@@ -14,17 +14,75 @@ import { Buffer } from 'node:buffer'
 import type { VncRect } from '../../shared/types'
 import type { ByteStream, PixelFormat } from './rfb'
 
+/**
+ * 把一块 RGBA 矩形按 factor 倍降采样（factor×factor 取平均）。
+ *
+ * 用处是 Retina 屏：Mac 报过来的是 2940×1912 物理像素，而 Pylon 里那块画布
+ * 通常只有一千像素宽 —— 三倍细节根本没人看得到，却要每帧从主进程序列化到
+ * 渲染进程、再上传进 canvas。按 2 倍降采样后内容量直接降到 1/4，视觉上
+ * 几乎无差（Retina 的 2x 本来就是为了给眼睛做平均的）。
+ *
+ * 坐标同步按比例缩小，所以调用方拿到的矩形可以直接贴进缩小后的画布。
+ */
+export function downscaleRect(rect: VncRect, factor: number): VncRect {
+  if (factor <= 1) return rect
+
+  const dw = Math.max(1, Math.floor(rect.w / factor))
+  const dh = Math.max(1, Math.floor(rect.h / factor))
+  const out = new Uint8Array(dw * dh * 4)
+  const n = factor * factor
+  const src = rect.data
+
+  for (let dy = 0; dy < dh; dy++) {
+    for (let dx = 0; dx < dw; dx++) {
+      let r = 0
+      let g = 0
+      let b = 0
+      for (let sy = 0; sy < factor; sy++) {
+        const rowBase = (dy * factor + sy) * rect.w
+        for (let sx = 0; sx < factor; sx++) {
+          const p = (rowBase + dx * factor + sx) * 4
+          r += src[p]
+          g += src[p + 1]
+          b += src[p + 2]
+        }
+      }
+      const o = (dy * dw + dx) * 4
+      out[o] = r / n
+      out[o + 1] = g / n
+      out[o + 2] = b / n
+      out[o + 3] = 255
+    }
+  }
+
+  return {
+    x: Math.floor(rect.x / factor),
+    y: Math.floor(rect.y / factor),
+    w: dw,
+    h: dh,
+    data: out
+  }
+}
+
+/** 变化检测的块大小。64×64 是 ZRLE 的 tile 尺寸，也是「一块字/一个小图标」的量级 */
+const DIRTY_TILE = 64
+
 /** 主进程侧的完整屏幕位图，RGBA 排列 */
 export class Framebuffer {
   readonly width: number
   readonly height: number
   readonly data: Uint8Array
+  /** data 的 32 位视图：比对走整字比逐字节快一个数量级（实测 22MB 从 200ms 降到 3ms 级） */
+  private readonly words: Uint32Array
+  /** 是否已经贴过内容 */
+  private painted = false
 
   constructor(width: number, height: number) {
     this.width = width
     this.height = height
     // 1080p 约 8MB，一次分配长期持有，不做增量扩容
     this.data = new Uint8Array(width * height * 4)
+    this.words = new Uint32Array(this.data.buffer)
   }
 
   /** 把一块矩形贴进整屏 */
@@ -34,6 +92,60 @@ export class Framebuffer {
       const dst = ((rect.y + row) * this.width + rect.x) * 4
       const src = row * rowBytes
       this.data.set(rect.data.subarray(src, src + rowBytes), dst)
+    }
+    this.painted = true
+  }
+
+  /**
+   * 只把**真正变化**的 64×64 块贴进整屏，并把变化块收集到 out 里。
+   *
+   * 为什么要这么做：服务端经常整屏重传（Apple 在 VNC 模式下就是这样），
+   * 但实际变化的往往只是一小块。整屏 2940×1912 是 22MB，每帧把它从主进程
+   * 序列化到渲染进程再 putImageData，光这一步就够把 UI 卡出明显掉帧。
+   * 按块比对之后，拖窗口只传窗口覆盖的那几块，滚动只传滚过的那几条。
+   *
+   * 首次贴图（framebuffer 还是空的）走快速路径，不做比对 —— 那时必然全变。
+   */
+  blitDirty(rect: VncRect, out: VncRect[]): void {
+    if (!this.painted) {
+      this.blit(rect)
+      out.push(rect)
+      return
+    }
+
+    const srcWords = new Uint32Array(
+      rect.data.buffer,
+      rect.data.byteOffset,
+      rect.data.byteLength >>> 2
+    )
+    const dstWords = this.words
+    const srcRowWords = rect.w
+
+    for (let ty = 0; ty < rect.h; ty += DIRTY_TILE) {
+      const th = Math.min(DIRTY_TILE, rect.h - ty)
+      for (let tx = 0; tx < rect.w; tx += DIRTY_TILE) {
+        const tw = Math.min(DIRTY_TILE, rect.w - tx)
+
+        let changed = false
+        for (let row = 0; row < th; row++) {
+          const dstOff = (rect.y + ty + row) * this.width + rect.x + tx
+          const srcOff = (ty + row) * srcRowWords + tx
+          if (!sameWords(dstWords, dstOff, srcWords, srcOff, tw)) {
+            changed = true
+            break
+          }
+        }
+        if (!changed) continue
+
+        const data = new Uint8Array(tw * th * 4)
+        for (let row = 0; row < th; row++) {
+          const dstOff = ((rect.y + ty + row) * this.width + rect.x + tx) * 4
+          const srcOff = (ty + row) * srcRowWords * 4 + tx * 4
+          this.data.set(rect.data.subarray(srcOff, srcOff + tw * 4), dstOff)
+          data.set(this.data.subarray(dstOff, dstOff + tw * 4), row * tw * 4)
+        }
+        out.push({ x: rect.x + tx, y: rect.y + ty, w: tw, h: th, data })
+      }
     }
   }
 
@@ -47,6 +159,14 @@ export class Framebuffer {
     }
     return out
   }
+}
+
+/** 按 32 位整字比较一段像素是否相同 */
+function sameWords(a: Uint32Array, aOff: number, b: Uint32Array, bOff: number, n: number): boolean {
+  for (let i = 0; i < n; i++) {
+    if (a[aOff + i] !== b[bOff + i]) return false
+  }
+  return true
 }
 
 /**
@@ -281,7 +401,7 @@ export class ZrleDecoder {
 
     const raw = this.output.length === 1 ? this.output[0] : Buffer.concat(this.output)
     this.output = []
-    return decodeZrleTiles(raw, x, y, w, h, codec)
+    return await decodeZrleTiles(raw, x, y, w, h, codec)
   }
 
   dispose(): void {
@@ -290,21 +410,34 @@ export class ZrleDecoder {
   }
 }
 
+/**
+ * 每处理这么多个 tile 就让出一次事件循环。
+ *
+ * 全屏 ZRLE 一帧要还原 1300 多个 tile，同步跑完要 45ms —— 这 45ms 里主进程
+ * 完全哑掉，IPC、SSH 心跳、窗口重绘全排在后面，用户感觉就是「点一下要顿一下」。
+ * 切成 128 个一组之后每段只有 4ms 左右，事件循环的阻塞感基本消失，
+ * 代价是十几次 setImmediate（合计不到 1ms）。
+ */
+const TILES_PER_SLICE = 128
+
+const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
 /** 单独拆出来，纯内存函数，方便脱离网络单测 */
-export function decodeZrleTiles(
+export async function decodeZrleTiles(
   raw: Buffer,
   x: number,
   y: number,
   w: number,
   h: number,
   codec: PixelCodec
-): VncRect {
+): Promise<VncRect> {
   const data = new Uint8Array(w * h * 4)
   // 整字写入：一个 Uint32 就是一个小端 RGBA 像素，比逐字节赋值快 3 倍左右。
   // Retina 全屏 560 万像素时这一步决定了整帧解码是 50ms 还是 15ms。
   const u32 = new Uint32Array(data.buffer)
   const cp = codec.cpixelBytes
   let p = 0
+  let tiles = 0
 
   for (let ty = 0; ty < h; ty += 64) {
     const tileH = Math.min(64, h - ty)
@@ -312,6 +445,7 @@ export function decodeZrleTiles(
       const tileW = Math.min(64, w - tx)
       if (p >= raw.length) throw new Error('ZRLE 数据提前结束：tile 头缺失')
       const sub = raw[p++]
+      if (++tiles % TILES_PER_SLICE === 0) await yieldToLoop()
 
       if (sub === 0) {
         // 原始 tile

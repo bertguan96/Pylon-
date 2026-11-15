@@ -8,7 +8,7 @@ electronDist: build/electron-dist
 
 directories:
   buildResources: build
-  output: build-output-9
+  output: build-output-12
 
 files:
   - out/**
