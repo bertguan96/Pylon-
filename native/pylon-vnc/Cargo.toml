@@ -1,0 +1,20 @@
+[package]
+name = "pylon-vnc"
+version = "0.1.0"
+edition = "2021"
+description = "Pylon 的原生 VNC 引擎：RFB 协议、ZRLE 解码、脏块比对全部在进程内完成"
+
+[[bin]]
+name = "pylon-vnc"
+path = "src/main.rs"
+
+[dependencies]
+# 只用纯 Rust 后端（miniz_oxide），这样交叉编译到 gnu 目标时不需要 C 工具链
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

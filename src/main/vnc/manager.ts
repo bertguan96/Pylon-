@@ -15,12 +15,38 @@ import type {
   VncSessionInfo
 } from '../../shared/types'
 import { VncClient, securityLabel } from './client'
+import type { VncEngine, VncEngineOptions } from './engine'
+import { NativeVncClient, nativeEnginePath } from './native'
 
 type EmitFn = (event: MainEvent) => void
 
 interface Entry {
-  client: VncClient
+  client: VncEngine
   info: VncSessionInfo
+}
+
+/**
+ * 选引擎。
+ *
+ * 默认优先原生：RFB 协议、ZRLE 解压、降采样、脏块比对全在独立进程里做，
+ * 主进程只剩转发字节，画面再重也压不住 UI。原生 exe 缺失（或用户显式
+ * 设了 PYLON_VNC_ENGINE_MODE=js）时退回 TS 实现 —— 两条路都能连通，
+ * 区别只在同样一台 Mac 上客户端每帧多花几十毫秒。
+ */
+function createEngine(options: VncEngineOptions): VncEngine {
+  const mode = process.env.PYLON_VNC_ENGINE_MODE
+  if (mode !== 'js') {
+    const exe = nativeEnginePath()
+    if (exe) {
+      console.log(`[vnc] 使用原生引擎：${exe}`)
+      return new NativeVncClient(options, exe)
+    }
+    if (mode === 'native') {
+      throw new Error('找不到原生引擎 pylon-vnc.exe，请先运行 npm run build:native')
+    }
+    console.warn('[vnc] 未找到原生引擎，退回 JS 实现（帧率会明显下降）')
+  }
+  return new VncClient(options)
 }
 
 export class VncManager {
@@ -32,7 +58,7 @@ export class VncManager {
     const sessionId = randomUUID()
     this.emit({ type: 'vnc:status', sessionId, status: 'connecting' })
 
-    const client: VncClient = new VncClient({
+    const client: VncEngine = createEngine({
       host: conn.host,
       port: conn.port,
       password,

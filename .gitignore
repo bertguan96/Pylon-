@@ -9,3 +9,6 @@ out/
 .smoke-*/
 .workbuddy/
 .tmp-*
+
+# Rust 原生引擎的编译产物与依赖缓存
+native/pylon-vnc/target/

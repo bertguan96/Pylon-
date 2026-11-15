@@ -8,12 +8,17 @@ electronDist: build/electron-dist
 
 directories:
   buildResources: build
-  output: build-output-12
+  output: build-output-13
 
 files:
   - out/**
   - "!**/.DS_Store"
   - "!**/*.map"
+
+# 原生 VNC 引擎：独立 exe，放到 resources 根目录（不进 asar，因为它要被 spawn）
+extraResources:
+  - from: native/pylon-vnc/bin/pylon-vnc.exe
+    to: pylon-vnc.exe
 
 # ssh2 是纯 JS，asar 内可正常 require；遇到原生模块时再在这里补 asarUnpack
 asar: true

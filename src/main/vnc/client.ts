@@ -94,6 +94,8 @@ const FIRST_FRAME_MS = 6000
 const MIN_REQUEST_GAP_MS = 6
 
 export class VncClient {
+  /** 引擎标识：日志里区分原生/兜底两条路径 */
+  readonly engine = 'js' as const
   private readonly options: Options
   private socket: Socket | null = null
   private stream: ByteStream | null = null
