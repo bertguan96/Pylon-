@@ -62,6 +62,25 @@ export const PIXEL_FORMAT_RGBA32: PixelFormat = {
   blueShift: 0
 }
 
+/**
+ * 低带宽用的 16 位格式（RGB565）。
+ *
+ * Retina 大屏（2940×1912）在 32bpp 下每帧原始数据 22.5MB，服务端光做 ZRLE 编码
+ * 就要一两秒；换成 16bpp 后传输量减半，编码也快不少，代价是渐变色带。
+ */
+export const PIXEL_FORMAT_RGB565: PixelFormat = {
+  bitsPerPixel: 16,
+  depth: 16,
+  bigEndian: false,
+  trueColor: true,
+  redMax: 31,
+  greenMax: 63,
+  blueMax: 31,
+  redShift: 11,
+  greenShift: 5,
+  blueShift: 0
+}
+
 export function readPixelFormat(buf: Buffer, offset: number): PixelFormat {
   return {
     bitsPerPixel: buf[offset],

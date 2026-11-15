@@ -37,6 +37,8 @@ export class VncManager {
       port: conn.port,
       password,
       timeout: conn.timeout,
+      // 缺省走 16 位色：Retina 大屏上这是帧率与流量的最优解，色带在文字界面上基本看不出
+      quality: conn.quality === 'sharp' ? 'sharp' : 'speed',
       onInit: (init) => {
         this.emit({
           type: 'vnc:init',

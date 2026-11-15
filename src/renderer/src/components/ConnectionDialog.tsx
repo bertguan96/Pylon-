@@ -5,7 +5,8 @@ import type {
   ConnectionInput,
   ConnectionKind,
   DiagnoseResult,
-  VncProbeResult
+  VncProbeResult,
+  VncQuality
 } from '../../../shared/types'
 import { cleanError } from '../lib/ipc-error'
 
@@ -26,6 +27,7 @@ interface FormState {
   secret: string
   remember: boolean
   legacy: boolean
+  quality: VncQuality
   group: string
 }
 
@@ -50,6 +52,7 @@ export default function ConnectionDialog({ initial, onClose, onSaved }: Props) {
     secret: '',
     remember: true,
     legacy: initial?.legacyAlgorithms ?? false,
+    quality: initial?.quality ?? 'speed',
     group: initial?.group ?? ''
   }))
 
@@ -92,6 +95,7 @@ export default function ConnectionDialog({ initial, onClose, onSaved }: Props) {
         ? form.privateKeyPath || undefined
         : undefined,
     group: form.group || undefined,
+    quality: form.kind === 'vnc' ? form.quality : undefined,
     legacyAlgorithms: form.kind === 'ssh' ? form.legacy : false,
     secret: form.secret === '' ? (initial?.hasSecret ? undefined : '') : form.secret,
     rememberSecret: form.remember
@@ -260,6 +264,33 @@ export default function ConnectionDialog({ initial, onClose, onSaved }: Props) {
               />
               <span>记住凭据（经系统密钥加密后存入本机，换用户账户后失效）</span>
             </label>
+          )}
+
+          {isVnc && (
+            <div className="field">
+              <label className="field-label">画面质量</label>
+              <div className="kind-switch">
+                <button
+                  type="button"
+                  className={form.quality === 'speed' ? 'active' : ''}
+                  onClick={() => patch({ quality: 'speed' })}
+                >
+                  流畅（16 位色）
+                </button>
+                <button
+                  type="button"
+                  className={form.quality === 'sharp' ? 'active' : ''}
+                  onClick={() => patch({ quality: 'sharp' })}
+                >
+                  清晰（32 位色）
+                </button>
+              </div>
+              <div className="hint" style={{ marginTop: 6 }}>
+                {form.quality === 'speed'
+                  ? '流量约为清晰模式的一半，首帧快一倍；文字界面看不出差别，渐变壁纸会有轻微色带。'
+                  : '色彩准确，但 Retina 大屏每帧数据量大，帧率会明显低一些。'}
+              </div>
+            </div>
           )}
 
           {isVnc ? (

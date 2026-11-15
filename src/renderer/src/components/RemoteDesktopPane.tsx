@@ -33,6 +33,14 @@ export default function RemoteDesktopPane({ sessionId, active }: Props) {
   const pendingRef = useRef<{ x: number; y: number } | null>(null)
   const rafRef = useRef(0)
   const sidRef = useRef<string | null>(sessionId)
+  /**
+   * 复用的贴图缓冲。
+   *
+   * 远端是 2940×1912，整帧 RGBA 有 22.5MB——每帧新建一块再扔掉，
+   * GC 会把主线程切出几十毫秒的空洞，表现就是拖动时一顿一顿。
+   * 增量帧的矩形尺寸高度重复，缓存一个 ImageData 就能命中九成以上的帧。
+   */
+  const imageCache = useRef<{ image: ImageData; w: number; h: number } | null>(null)
 
   const [info, setInfo] = useState<{ width: number; height: number; name: string } | null>(null)
   const [note, setNote] = useState('')
@@ -52,6 +60,7 @@ export default function RemoteDesktopPane({ sessionId, active }: Props) {
         canvas.width = width
         canvas.height = height
         ctxSize.current = { width, height }
+        imageCache.current = null
         const ctx = canvas.getContext('2d', { alpha: false })
         ctxRef.current = ctx
         if (ctx) {
@@ -68,11 +77,18 @@ export default function RemoteDesktopPane({ sessionId, active }: Props) {
         for (const rect of rects) {
           if (rect.w <= 0 || rect.h <= 0) continue
           if (rect.x + rect.w > width || rect.y + rect.h > height) continue
-          // 复制一份到独立的 ArrayBuffer：ImageData 的构造函数只接受非共享缓冲，
-          // 直接复用 IPC 传过来的视图在类型上过不去，顺手也避免了视图生命周期问题
-          const pixels = new Uint8ClampedArray(rect.w * rect.h * 4)
-          pixels.set(rect.data)
-          ctx.putImageData(new ImageData(pixels, rect.w, rect.h), rect.x, rect.y)
+
+          // 尺寸命中缓存就复用同一块缓冲，只有矩形大小变了才重新分配
+          const cache = imageCache.current
+          let image: ImageData
+          if (cache && cache.w === rect.w && cache.h === rect.h) {
+            image = cache.image
+          } else {
+            image = new ImageData(rect.w, rect.h)
+            imageCache.current = { image, w: rect.w, h: rect.h }
+          }
+          image.data.set(rect.data)
+          ctx.putImageData(image, rect.x, rect.y)
         }
       },
       clipboard: (text) => {

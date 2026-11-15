@@ -17,6 +17,7 @@ import type { VncRect, VncSecurity } from '../../shared/types'
 import {
   ByteStream,
   ENCODING,
+  PIXEL_FORMAT_RGB565,
   PIXEL_FORMAT_RGBA32,
   SECURITY,
   SERVER_MSG,
@@ -54,10 +55,15 @@ interface Options extends VncClientCallbacks {
   password?: string
   /** TCP 建连超时，不含握手 */
   timeout?: number
+  /** speed = 16 位色（流量小、编码快，有轻微色带）；sharp = 32 位色 */
+  quality?: 'speed' | 'sharp'
 }
 
 /** 单帧最小刷新间隔：再快也没意义，服务端本来就按请求回 */
 const REFRESH_IDLE_MS = 900
+
+/** 流水线深度：同时在服务端挂着的 FramebufferUpdateRequest 数 */
+const MAX_IN_FLIGHT = 2
 
 /**
  * 两次 FramebufferUpdateRequest 之间的最小间隔。
@@ -66,9 +72,10 @@ const REFRESH_IDLE_MS = 900
  * 服务端没有变化时会压着请求不回；但碰上环回地址、或者某些实现得比较粗糙的
  * 服务端（有变化就立刻回），这个循环会退化成几千 fps 的空转 —— 实测在
  * mock 上跑到 5900 fps / 2.4Gbps，CPU 与带宽全被烧在了几个像素的位移上。
- * 12ms 相当于 80fps 的天花板，高于人眼与常见屏幕刷新，够用且能兜住这种空转。
+ * 这个间隔会直接吃掉帧率：服务端编码一帧要几十毫秒时，等 12ms 相当于白扔
+ * 两三成的帧。所以取 6ms —— 足够挡住空转，又不至于在真机上明显拖后腿。
  */
-const MIN_REQUEST_GAP_MS = 12
+const MIN_REQUEST_GAP_MS = 6
 
 export class VncClient {
   private readonly options: Options
@@ -85,10 +92,16 @@ export class VncClient {
   private statsTimer: NodeJS.Timeout | null = null
   private refreshTimer: NodeJS.Timeout | null = null
   private requestTimer: NodeJS.Timeout | null = null
-  /** 排队中的请求是否为增量；false 表示整帧。null = 没有排队 */
-  private pendingIncremental: boolean | null = null
+  /** 流水线：排队等待发出的请求（true = 增量，false = 整帧） */
+  private requestQueue: boolean[] = []
+  /** 已发出、还没等到响应的请求数 */
+  private inFlight = 0
   private statsBytes = 0
   private statsFrames = 0
+  /** 各编码的使用情况，只用于诊断日志：encoding → 出现次数 / 像素数 */
+  private statsEncodings = new Map<number, { count: number; pixels: number }>()
+  /** 单帧解码（解压 + tile 还原）的最长耗时，毫秒 */
+  private statsDecodeMs = 0
 
   /** 上一次握手时对端给出的认证方式，探测报告里用得上 */
   securityTypes: number[] = []
@@ -190,7 +203,9 @@ export class VncClient {
     // 统一像素格式，省掉解码时的位运算（详见 PIXEL_FORMAT_RGBA32 的注释）
     const fmt = Buffer.alloc(20)
     fmt[0] = 0
-    writePixelFormat(fmt, 4, PIXEL_FORMAT_RGBA32)
+    const pixelFormat = this.options.quality === 'sharp' ? PIXEL_FORMAT_RGBA32 : PIXEL_FORMAT_RGB565
+    writePixelFormat(fmt, 4, pixelFormat)
+    this.codec = new PixelCodec(pixelFormat)
     this.write(fmt)
     this.sendEncodings()
 
@@ -278,9 +293,7 @@ export class VncClient {
   }
 
   private sendEncodings(): void {
-    const list = this.useZrle
-      ? [ENCODING.ZRLE, ENCODING.COPY_RECT, ENCODING.RAW]
-      : [ENCODING.COPY_RECT, ENCODING.RAW]
+    const list = this.encodingList()
     const buf = Buffer.alloc(4 + list.length * 4)
     buf[0] = 2 // SetEncodings
     buf[1] = 0
@@ -289,13 +302,28 @@ export class VncClient {
     this.write(buf)
   }
 
+  private encodingList(): number[] {
+    // 探测用：VNC_ENCODINGS=7,16,5,1,0 直接覆盖候选列表
+    const override = process.env.VNC_ENCODINGS
+    if (override) {
+      const parsed = override
+        .split(',')
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isFinite(n))
+      if (parsed.length > 0) return parsed
+    }
+    if (this.useZrle) return [ENCODING.ZRLE, ENCODING.COPY_RECT, ENCODING.RAW]
+    return [ENCODING.COPY_RECT, ENCODING.RAW]
+  }
+
   private startLoop(): void {
     void this.runLoop().catch((err: unknown) => {
       this.finish(err instanceof Error ? err : new Error(String(err)))
     })
 
-    // 先要一整帧（incremental=0），之后每次都只要变化部分
+    // 初始要一整帧；紧接着再排一个增量，让流水线从第一帧起就转起来
     this.requestUpdate(false)
+    this.requestUpdate(true)
 
     this.statsTimer = setInterval(() => {
       const fps = this.statsFrames
@@ -303,6 +331,19 @@ export class VncClient {
       this.statsFrames = 0
       this.statsBytes = 0
       this.options.onStats?.({ fps, kbps })
+
+      if (process.env.VNC_TRACE && this.statsEncodings.size > 0) {
+        const parts = [...this.statsEncodings.entries()].map(([enc, r]) => {
+          const name =
+            enc === ENCODING.RAW ? 'Raw' : enc === ENCODING.COPY_RECT ? 'CopyRect' : enc === ENCODING.ZRLE ? 'ZRLE' : `#${enc}`
+          return `${name}×${r.count}(${(r.pixels / 1e6).toFixed(2)}MP)`
+        })
+        console.log(
+          `[vnc] ${fps}fps ${kbps}kbps | ${parts.join(' ')} | 解码最长 ${this.statsDecodeMs.toFixed(0)}ms`
+        )
+        this.statsEncodings.clear()
+        this.statsDecodeMs = 0
+      }
     }, 1000)
 
     // 服务端偶尔会漏掉一次响应（尤其 Wi-Fi 抖动时），补一个请求避免画面停住
@@ -351,6 +392,9 @@ export class VncClient {
     const fb = this.fb
     if (!fb) throw new Error('还没收到 ServerInit 就来了帧数据')
 
+    // 一个响应对应一个在飞的请求；先减掉，后面 requestUpdate 才能立刻补上
+    this.inFlight--
+    const tDecode = performance.now()
     await stream.skip(1)
     const count = await stream.u16()
     const rects: VncRect[] = []
@@ -365,6 +409,11 @@ export class VncClient {
       if (x + w > fb.width || y + h > fb.height) {
         throw new Error(`帧越界：${w}×${h}@${x},${y}，屏幕 ${fb.width}×${fb.height}`)
       }
+
+      const rec = this.statsEncodings.get(encoding) ?? { count: 0, pixels: 0 }
+      rec.count++
+      rec.pixels += w * h
+      this.statsEncodings.set(encoding, rec)
 
       let rect: VncRect
       switch (encoding) {
@@ -381,6 +430,7 @@ export class VncClient {
             throw new Error(`ZRLE 数据长度异常：${len}`)
           }
           const payload = await stream.read(len)
+          const tZrle = performance.now()
           try {
             rect = await this.zrleDecode(payload, x, y, w, h)
           } catch (err) {
@@ -388,6 +438,7 @@ export class VncClient {
             this.dropZrle(err)
             return
           }
+          this.statsDecodeMs = Math.max(this.statsDecodeMs, performance.now() - tZrle)
           break
         }
         default:
@@ -428,25 +479,45 @@ export class VncClient {
   /**
    * 排一个 FramebufferUpdateRequest。
    *
-   * 同一时刻只允许一个请求在飞（协议要求，也是唯一不会把内存打满的做法），
-   * 并且用 MIN_REQUEST_GAP_MS 兜住请求速率上限。整帧请求优先级更高：
-   * 如果已经排着一个增量请求、这时又要求整帧（比如面板刚挂载），就把它升级成整帧，
-   * 而不是让整帧请求被增量顶掉、白等一帧。
+   * 流水线深度为 2：保持两个请求在服务端挂着，服务端编码完一帧就能立刻发
+   * 下一帧，不用等「客户端收到帧 → 发新请求 → 网络往返」这段空窗。
+   * Wi-Fi RTT 35ms 时，这段空窗占掉 80ms 一帧的四成 —— 这就是一问一答模式
+   * 明明服务端只要 50ms 编一帧、却只能跑 12fps 的原因。
+   *
+   * 流量代价：静止画面时服务端不回帧（两个请求都挂着，零流量）；
+   * 有变化时一次变化最多回两帧，极端情况下带宽翻倍。换来的是动画场景帧率
+   * 提升 40% 左右，划算。
+   *
+   * 整帧请求优先级更高：队列里已有整帧时增量不再重复排；队列满时增量
+   * 可以被整帧顶掉。
    */
   private requestUpdate(incremental: boolean): void {
     if (this.closed || !this.active) return
     if (!this.fb) return
 
-    if (this.pendingIncremental === null || !incremental) this.pendingIncremental = incremental
-    if (this.requestTimer) return
+    if (this.requestQueue.includes(false)) return // 整帧已在队列，增量没有意义
+    if (this.requestQueue.length >= MAX_IN_FLIGHT) {
+      if (!incremental) this.requestQueue = [false] // 顶掉排队的增量
+      return
+    }
+    this.requestQueue.push(incremental)
+    this.pumpRequests()
+  }
 
+  private pumpRequests(): void {
+    if (this.requestTimer) return
     const gap = MIN_REQUEST_GAP_MS - (Date.now() - this.lastRequestAt)
     this.requestTimer = setTimeout(() => {
       this.requestTimer = null
-      const queued = this.pendingIncremental
-      this.pendingIncremental = null
-      if (queued === null) return
-      this.sendRequest(queued)
+      while (
+        this.requestQueue.length > 0 &&
+        this.inFlight < MAX_IN_FLIGHT &&
+        !this.closed &&
+        this.active
+      ) {
+        const queued = this.requestQueue.shift()
+        if (queued !== undefined) this.sendRequest(queued)
+      }
     }, gap > 0 ? gap : 0)
   }
 
@@ -463,6 +534,7 @@ export class VncClient {
     buf.writeUInt16BE(fb.height, 8)
     this.write(buf)
     this.lastRequestAt = Date.now()
+    this.inFlight++
   }
 
   // ---------- 对外的输入接口 ----------
@@ -531,7 +603,8 @@ export class VncClient {
     this.statsTimer = null
     this.refreshTimer = null
     this.requestTimer = null
-    this.pendingIncremental = null
+    this.requestQueue = []
+    this.inFlight = 0
 
     this.zrle?.dispose()
     this.zrle = null

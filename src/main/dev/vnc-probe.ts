@@ -13,8 +13,9 @@ import { app } from 'electron'
 import { createServer, type AddressInfo, type Socket } from 'node:net'
 import { constants as zlibConstants, createDeflate } from 'node:zlib'
 import type { VncRect } from '../../shared/types'
-import { PIXEL_FORMAT_RGBA32, ByteStream, writePixelFormat } from '../vnc/rfb'
+import { PIXEL_FORMAT_RGB565, PIXEL_FORMAT_RGBA32, ByteStream, writePixelFormat } from '../vnc/rfb'
 import { VncClient } from '../vnc/client'
+import { PixelCodec, decodeZrleTiles } from '../vnc/decoders'
 import { desSelfTest, vncAuthResponse } from '../vnc/des'
 
 const W = 200
@@ -581,6 +582,8 @@ async function run(): Promise<void> {
     host: '127.0.0.1',
     port,
     password: PASSWORD,
+    // 假服务端只按 32 位色拼数据；16 位色另有一条独立断言（见 decode Rgb565 那段）
+    quality: 'sharp',
     onInit: (i) => {
       seen.init = i
     },
@@ -645,6 +648,25 @@ async function run(): Promise<void> {
         'ZRLE 八块 tile 解码一致（纯色/4色调色板/2色调色板/纯RLE/原样/两种调色板RLE）',
         bad === 0,
         bad === 0 ? '全像素吻合' : firstDiff(zrle.expected, actual)
+      )
+    }
+
+    // ---- 16 位色（RGB565）解码：真机默认走这条路径，必须单独验一遍
+    {
+      const codec565 = new PixelCodec(PIXEL_FORMAT_RGB565)
+      // 纯色 tile：sub=1 + 一个 CPIXEL（小端 0xF800 = 纯红）
+      const red = decodeZrleTiles(Buffer.from([1, 0x00, 0xf8]), 0, 0, 1, 1, codec565)
+      // 0x07E0 = 纯绿（g=63），0x001F = 纯蓝
+      const green = decodeZrleTiles(Buffer.from([1, 0xe0, 0x07]), 0, 0, 1, 1, codec565)
+      const blue = decodeZrleTiles(Buffer.from([1, 0x1f, 0x00]), 0, 0, 1, 1, codec565)
+      const rgba = (r: VncRect) => `${r.data[0]},${r.data[1]},${r.data[2]},${r.data[3]}`
+      check(
+        '16 位色 CPIXEL 为 2 字节，RGB565 三原色解码正确',
+        codec565.cpixelBytes === 2 &&
+          rgba(red) === '255,0,0,255' &&
+          rgba(green) === '0,255,0,255' &&
+          rgba(blue) === '0,0,255,255',
+        `红 ${rgba(red)} · 绿 ${rgba(green)} · 蓝 ${rgba(blue)}`
       )
     }
 

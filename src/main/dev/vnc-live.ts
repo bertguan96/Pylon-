@@ -38,6 +38,7 @@ async function runLive(host: string, port: number, password: string): Promise<nu
     host,
     port,
     password: password || undefined,
+    quality: process.env.VNC_BPP === '32' ? 'sharp' : 'speed',
     onInit: (info) => {
       tInit = Date.now() - t0
       console.log(

@@ -13,6 +13,16 @@ export type AuthType = 'password' | 'privateKey' | 'agent'
  */
 export type ConnectionKind = 'ssh' | 'vnc'
 
+/**
+ * 远程画面的画质档位。
+ *
+ * speed —— 16 位色（RGB565）。Retina 大屏上传输量直接减半，首帧快一倍，
+ *          代价是渐变有轻微色带，文字和界面几乎看不出差别。
+ * sharp —— 32 位色。色彩准确，但 2940×1912 每帧原始数据 22.5MB，
+ *          服务端编码压力大、帧率明显更低。
+ */
+export type VncQuality = 'speed' | 'sharp'
+
 /** 一条连接配置。注意：这里【不包含】密码和私钥口令，它们单独加密存储。 */
 export interface ConnectionConfig {
   id: string
@@ -29,6 +39,8 @@ export interface ConnectionConfig {
   group?: string
   /** 标签颜色标识 */
   color?: string
+  /** 远程桌面的画质档位，缺省按 speed */
+  quality?: VncQuality
   /**
    * 放开老算法白名单。老摄像头、老 NAS 往往只支持 sha1 系列 KEX/MAC，
    * 不开这个开关会直接握手失败。默认 false。
@@ -54,6 +66,7 @@ export interface ConnectionInput {
   privateKeyPath?: string
   group?: string
   color?: string
+  quality?: VncQuality
   legacyAlgorithms: boolean
   timeout?: number
   /** 明文密码或私钥口令。传 undefined 表示"沿用已保存的"，传空串表示"清空" */

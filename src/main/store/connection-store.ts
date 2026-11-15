@@ -137,6 +137,7 @@ export class ConnectionStore {
       privateKeyPath: input.privateKeyPath || undefined,
       group: input.group?.trim() || undefined,
       color: input.color || undefined,
+      quality: kind === 'vnc' ? (input.quality ?? 'speed') : undefined,
       legacyAlgorithms: input.legacyAlgorithms,
       timeout: input.timeout ?? 15000,
       hasSecret,
