@@ -7,7 +7,8 @@ import type {
   OpenSessionRequest,
   QuickCommand,
   QuickCommandInput,
-  SessionInfo
+  SessionInfo,
+  StreamOpenRequest
 } from '../shared/types'
 import type { ConnectionStore } from './store/connection-store'
 import type { QuickCommandStore } from './store/quick-command-store'
@@ -16,12 +17,23 @@ import type { VncManager } from './vnc/manager'
 import { probeVnc } from './vnc/manager'
 import type { VncOpenRequest, VncProbeInput, VncProbeResult, VncSessionInfo } from '../shared/types'
 import { diagnose } from './ssh/diagnose'
+import {
+  openStream,
+  closeStream,
+  streamInput,
+  streamKeyreq
+} from './stream/manager'
 
 /** 主进程事件统一从这里推给渲染进程，避免散落各处的 webContents.send */
+let streamEmit: ((channel: string, payload: unknown) => void) | null = null
+
 export function createEmitter(getWindow: () => BrowserWindow | null) {
-  return (event: MainEvent) => {
+  const emit = (event: MainEvent) => {
     getWindow()?.webContents.send('main:event', event)
   }
+  // stream manager 用同一条 main:event 通道，只是它自己带 type 字段
+  streamEmit = (_channel, payload) => emit(payload as MainEvent)
+  return emit
 }
 
 export function registerIpc(
@@ -157,6 +169,53 @@ export function registerIpc(
   })
 
   ipcMain.handle('vnc:probe', (_e, input: VncProbeInput): Promise<VncProbeResult> => probeVnc(input))
+
+  // ---------- 自研低延迟串流（Pylon Stream） ----------
+
+  ipcMain.handle('stream:open', (_e, req: StreamOpenRequest) => {
+    if (!streamEmit) throw new Error('主进程事件通道未初始化')
+    openStream(req.sessionId, { host: req.host, port: req.port }, streamEmit)
+  })
+
+  ipcMain.handle('stream:close', (_e, sessionId: string) => {
+    closeStream(sessionId)
+  })
+
+  ipcMain.on('stream:pointer',
+    (_e, sessionId: string, x: number, y: number, button: number, down: boolean) => {
+      // 负载：子类型 1 + x:u16 + y:u16
+      const b = Buffer.alloc(5)
+      b[0] = 1
+      b.writeUInt16BE(Math.max(0, Math.min(0xffff, Math.round(x))), 1)
+      b.writeUInt16BE(Math.max(0, Math.min(0xffff, Math.round(y))), 3)
+      streamInput(sessionId, b)
+      if (down && button >= 0) {
+        // 按键按下单独发一条（子类型 2）
+        const k = Buffer.alloc(3)
+        k[0] = 2; k[1] = button; k[2] = down ? 1 : 0
+        streamInput(sessionId, k)
+      }
+    })
+
+  ipcMain.on('stream:wheel', (_e, sessionId: string, delta: number) => {
+    const b = Buffer.alloc(3)
+    b[0] = 3
+    b.writeInt16BE(Math.max(-32768, Math.min(32767, Math.round(delta))), 1)
+    streamInput(sessionId, b)
+  })
+
+  ipcMain.on('stream:key', (_e, sessionId: string, macKeyCode: number, down: boolean) => {
+    // 协议负载 4 字节：子类型(1) + mac 虚拟键码(2, 大端) + down(1)
+    const b = Buffer.alloc(4)
+    b[0] = 4
+    b.writeUInt16BE(Math.max(0, Math.min(0xffff, Math.round(macKeyCode))), 1)
+    b[3] = down ? 1 : 0
+    streamInput(sessionId, b)
+  })
+
+  ipcMain.on('stream:keyreq', (_e, sessionId: string) => {
+    streamKeyreq(sessionId)
+  })
 
   // ---------- 快捷命令 ----------
 

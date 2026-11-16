@@ -34,6 +34,16 @@ const api: BridgeApi = {
     refresh: (sessionId) => ipcRenderer.send('vnc:refresh', sessionId),
     probe: (input) => ipcRenderer.invoke('vnc:probe', input)
   },
+  stream: {
+    open: (req) => ipcRenderer.invoke('stream:open', req),
+    close: (sessionId) => ipcRenderer.invoke('stream:close', sessionId),
+    pointer: (sessionId, x, y, button, down) =>
+      ipcRenderer.send('stream:pointer', sessionId, x, y, button, down),
+    wheel: (sessionId, delta) => ipcRenderer.send('stream:wheel', sessionId, delta),
+    key: (sessionId, macKeyCode, down) =>
+      ipcRenderer.send('stream:key', sessionId, macKeyCode, down),
+    keyreq: (sessionId) => ipcRenderer.send('stream:keyreq', sessionId)
+  },
   quickCommands: {
     list: () => ipcRenderer.invoke('quick:list'),
     save: (input) => ipcRenderer.invoke('quick:save', input),

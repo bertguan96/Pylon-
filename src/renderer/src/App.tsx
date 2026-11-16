@@ -23,6 +23,7 @@ import { cleanError } from './lib/ipc-error'
 
 import TerminalPane from './components/TerminalPane'
 import RemoteDesktopPane from './components/RemoteDesktopPane'
+import StreamPane from './components/StreamPane'
 import { dispatchRemote } from './lib/remote-registry'
 
 interface UiTab {
@@ -177,6 +178,24 @@ export default function App() {
     },
     [updateTab]
   )
+
+  /** 自研串流：Mac 上跑 pylon-stream-sender 后，输入它的 IP 即可连 */
+  const startStream = useCallback(async (host: string) => {
+    const tabId = uid()
+    setTabs((prev) => [
+      ...prev,
+      {
+        tabId,
+        sessionId: tabId, // 串流用 tabId 直接当 sessionId，省一次往返
+        connectionId: `stream:${host}`,
+        kind: 'stream' as const,
+        title: `串流 ${host}`,
+        host,
+        status: 'connecting' as const
+      }
+    ])
+    setActiveTabId(tabId)
+  }, [])
 
   const handleConnect = useCallback(
     (conn: ConnectionConfig) => {
@@ -453,6 +472,21 @@ export default function App() {
 
             <div className="tabbar-actions">
               <button
+                className="qc-toggle"
+                title="自研串流（Mac 端需先运行 pylon-stream-sender）"
+                onClick={() => {
+                  const host = window.prompt('输入 Mac 的 IP 地址（Mac 端需先运行 pylon-stream-sender）')
+                  if (host?.trim()) void startStream(host.trim())
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="4" width="20" height="13" rx="2" />
+                  <path d="M8 21h8M12 17v4" />
+                  <path d="M10 8l4 2.5-4 2.5z" fill="currentColor" />
+                </svg>
+                串流
+              </button>
+              <button
                 className={`qc-toggle ${quickOpen ? 'active' : ''}`}
                 title="快捷命令（Ctrl+Shift+K）"
                 onClick={() => setQuickOpen((v) => !v)}
@@ -490,7 +524,12 @@ export default function App() {
                 key={tab.tabId}
                 className={`pane ${tab.tabId === activeTabId ? 'active' : ''}`}
               >
-                {tab.kind === 'vnc' ? (
+                {tab.kind === 'stream' ? (
+                  <StreamPane
+                    sessionId={tab.sessionId ?? tab.tabId}
+                    host={tab.host}
+                  />
+                ) : tab.kind === 'vnc' ? (
                   <RemoteDesktopPane
                     sessionId={tab.sessionId}
                     active={tab.tabId === activeTabId}

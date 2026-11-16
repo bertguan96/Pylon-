@@ -31,7 +31,7 @@ interface FormState {
   group: string
 }
 
-const DEFAULT_PORT: Record<ConnectionKind, number> = { ssh: 22, vnc: 5900 }
+const DEFAULT_PORT: Record<ConnectionKind, number> = { ssh: 22, vnc: 5900, stream: 48000 }
 
 const SECURITY_TEXT: Record<string, string> = {
   'vnc-password': 'VNC 密码',

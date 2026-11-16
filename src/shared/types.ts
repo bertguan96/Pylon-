@@ -11,7 +11,7 @@ export type AuthType = 'password' | 'privateKey' | 'agent'
  * ssh  —— 终端会话（本应用的主线）
  * vnc  —— 远程桌面（RFB 协议，用来控 Mac / Windows / NAS 的图形界面）
  */
-export type ConnectionKind = 'ssh' | 'vnc'
+export type ConnectionKind = 'ssh' | 'vnc' | 'stream'
 
 /**
  * 远程画面的画质档位。
@@ -198,6 +198,30 @@ export type MainEvent =
   | { type: 'vnc:status'; sessionId: string; status: SessionStatus; error?: string }
   | { type: 'vnc:clipboard'; sessionId: string; text: string }
   | { type: 'vnc:stats'; sessionId: string; stats: VncStats }
+  // ---- 自研低延迟串流（Pylon Stream，私有 UDP + H.264）
+  | {
+      type: 'stream:init'
+      sessionId: string
+      width: number
+      height: number
+      fps: number
+    }
+  | {
+      type: 'stream:frame'
+      sessionId: string
+      /** H.264 Annex-B 完整帧 */
+      data: Uint8Array
+      /** 采集时间戳（毫秒） */
+      ts: number
+      key: boolean
+    }
+  | { type: 'stream:stats'; sessionId: string; stats: StreamStats }
+  | {
+      type: 'stream:status'
+      sessionId: string
+      status: SessionStatus
+      error?: string
+    }
 
 /**
  * 远程桌面（VNC / RFB）相关类型。
@@ -305,5 +329,34 @@ export interface BridgeApi {
     refresh: (sessionId: string) => void
     probe: (input: VncProbeInput) => Promise<VncProbeResult>
   }
+  /** 自研低延迟串流（Pylon Stream）：Mac 端需运行 pylon-stream-sender */
+  stream: {
+    open: (req: StreamOpenRequest) => Promise<void>
+    close: (sessionId: string) => Promise<void>
+    pointer: (sessionId: string, x: number, y: number, button: number, down: boolean) => void
+    wheel: (sessionId: string, delta: number) => void
+    key: (sessionId: string, macKeyCode: number, down: boolean) => void
+    keyreq: (sessionId: string) => void
+  }
   onEvent: (handler: (event: MainEvent) => void) => () => void
+}
+
+// ---------------------------------------------------------------------------
+// Pylon Stream（自研 UDP + H.264 串流）
+// ---------------------------------------------------------------------------
+
+export interface StreamOpenRequest {
+  host: string
+  port?: number
+  /** 调用方指定的会话 ID，与 UI 标签对应 */
+  sessionId: string
+}
+
+/** 每秒一次，用来判断是编码压力还是网络丢包 */
+export interface StreamStats {
+  fps: number
+  kbps: number
+  lostFrames: number
+  rttMs: number
+  packets: number
 }
