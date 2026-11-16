@@ -653,13 +653,14 @@ impl Session {
         }
         self.dirty = dirty;
 
-        // CPU 段异常时直接打一条，不占管道协议字段
-        if self.stats_proc_ms >= 15 {
-            eprintln!("[vnc-proc] 本秒 CPU 段峰值 {}ms（解码 {}ms，其余为降采样+比对）", self.stats_proc_ms, self.stats_decode_ms);
-        }
-
         // 每秒一份统计
         if self.stats_last.elapsed() >= Duration::from_secs(1) {
+            // CPU 段异常时打一条，不占管道协议字段。
+            // 必须放在每秒分支里：stats_proc_ms 是本秒累计值，放在每帧处会导致
+            // 超阈值后这一秒的每一帧都刷一行日志，把主进程的事件循环淹掉。
+            if self.stats_proc_ms >= 15 {
+                eprintln!("[vnc-proc] 本秒 CPU 段累计 {}ms（解码 {}ms，其余为降采样+比对）", self.stats_proc_ms, self.stats_decode_ms);
+            }
             let dt = self.stats_last.elapsed().as_secs_f64();
             let fps = (self.stats_frames as f64 / dt).round() as u16;
             let bytes = self.reader.received - self.stats_bytes;
