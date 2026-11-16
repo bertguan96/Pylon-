@@ -265,6 +265,8 @@ pub struct Session {
     stats_last: Instant,
     stats_decode_ms: u32,
     stats_total_ms: u32,
+    /// 纯 CPU 段（blit+collect+commit）的最大耗时，不含等网络的时间
+    stats_proc_ms: u32,
     frames: u64,
 }
 
@@ -395,6 +397,7 @@ impl Session {
             stats_last: Instant::now(),
             stats_decode_ms: 0,
             stats_total_ms: 0,
+            stats_proc_ms: 0,
             frames: 0,
         })
     }
@@ -409,6 +412,11 @@ impl Session {
 
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// 纯 CPU 段的单帧最大耗时（毫秒），诊断降采样/比对用
+    pub fn proc_ms(&self) -> u32 {
+        self.stats_proc_ms
     }
 
     /// 把当前降采样后的画面存成 24 位 BMP。
@@ -550,6 +558,7 @@ impl Session {
                 ENC_RAW => {
                     let pb = self.codec.pixel_bytes();
                     let bytes = self.reader.to_vec(w * h * pb).map_err(fmt)?;
+                    let t_proc = Instant::now();
                     self.raw.clear();
                     self.raw.resize(w * h, 0);
                     for i in 0..w * h {
@@ -557,6 +566,9 @@ impl Session {
                     }
                     self.surface.blit(&self.raw, x, y, w, h);
                     self.surface.collect(x, y, w, h, &mut dirty);
+                    let proc_ms = (t_proc.elapsed().as_millis() as u32)
+                        .saturating_add(self.stats_proc_ms);
+                    self.stats_proc_ms = proc_ms;
                 }
                 ENC_COPY_RECT => {
                     let sx = self.reader.u16().map_err(fmt)? as usize;
@@ -565,7 +577,11 @@ impl Session {
                         self.dirty = dirty;
                         return Err(format!("CopyRect 源越界：{w}×{h}@{sx},{sy}"));
                     }
+                    let t_proc = Instant::now();
                     self.surface.copy_rect(sx, sy, x, y, w, h, &mut dirty);
+                    let proc_ms = (t_proc.elapsed().as_millis() as u32)
+                        .saturating_add(self.stats_proc_ms);
+                    self.stats_proc_ms = proc_ms;
                 }
                 ENC_ZRLE => {
                     let len = self.reader.u32().map_err(fmt)? as usize;
@@ -595,8 +611,12 @@ impl Session {
                     if dec_ms > self.stats_decode_ms {
                         self.stats_decode_ms = dec_ms;
                     }
+                    let t_proc = Instant::now();
                     self.surface.blit(px, x, y, w, h);
                     self.surface.collect(x, y, w, h, &mut dirty);
+                    let proc_ms = (t_proc.elapsed().as_millis() as u32)
+                        .saturating_add(self.stats_proc_ms);
+                    self.stats_proc_ms = proc_ms;
                 }
                 other => {
                     self.dirty = dirty;
@@ -612,7 +632,10 @@ impl Session {
             self.shared.full_seen.store(true, Ordering::Relaxed);
         }
 
+        let t_proc = Instant::now();
         self.surface.commit(&dirty);
+        let proc_ms = (t_proc.elapsed().as_millis() as u32).saturating_add(self.stats_proc_ms);
+        self.stats_proc_ms = proc_ms;
 
         let total_ms = t_frame.elapsed().as_millis() as u32;
         if !dirty.is_empty() {
@@ -630,6 +653,11 @@ impl Session {
         }
         self.dirty = dirty;
 
+        // CPU 段异常时直接打一条，不占管道协议字段
+        if self.stats_proc_ms >= 15 {
+            eprintln!("[vnc-proc] 本秒 CPU 段峰值 {}ms（解码 {}ms，其余为降采样+比对）", self.stats_proc_ms, self.stats_decode_ms);
+        }
+
         // 每秒一份统计
         if self.stats_last.elapsed() >= Duration::from_secs(1) {
             let dt = self.stats_last.elapsed().as_secs_f64();
@@ -642,6 +670,7 @@ impl Session {
             self.stats_last = Instant::now();
             self.stats_decode_ms = 0;
             self.stats_total_ms = 0;
+            self.stats_proc_ms = 0;
         }
 
         self.pump()

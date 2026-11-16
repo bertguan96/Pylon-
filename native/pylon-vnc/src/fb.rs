@@ -249,3 +249,35 @@ impl Surface {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 整屏 collect 的微基准：模拟 2940×1912 的 2x 降采样路径
+    #[test]
+    fn bench_fullscreen_collect() {
+        let (w, h) = (2940, 1912);
+        let mut surf = Surface::new(w, h, 2);
+        // 随机像素，保证 tile_changed 大量命中（最坏情况）
+        let seed = 0x9E3779B9u64;
+        let mut s = seed;
+        for i in 0..surf.full.px.len() {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            surf.full.px[i] = (s >> 33) as u32;
+        }
+        // 先画一帧让 painted=true，让后续走「比对」路径
+        let mut d = Dirty::new();
+        surf.collect(0, 0, w, h, &mut d);
+        surf.commit(&d);
+        // 微调一个像素使全屏全部变化
+        for i in 0..surf.full.px.len() {
+            surf.full.px[i] ^= 1;
+        }
+        let t = std::time::Instant::now();
+        surf.collect(0, 0, w, h, &mut d);
+        let ms = t.elapsed().as_millis();
+        println!("全屏 collect（含降采样+比对+收集）: {ms}ms, tiles={}", d.tiles.len());
+        assert!(ms < 400, "全屏 collect 不应超过 400ms，实际 {ms}ms");
+    }
+}

@@ -9,8 +9,9 @@ name = "pylon-vnc"
 path = "src/main.rs"
 
 [dependencies]
-# 只用纯 Rust 后端（miniz_oxide），这样交叉编译到 gnu 目标时不需要 C 工具链
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# zlib-rs：纯 Rust 的 zlib 实现（libz-rs-sys），性能接近 zlib-ng，
+# 依然不需要 C 工具链，交叉编译到 gnu 目标不受影响
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 [profile.release]
 opt-level = 3
