@@ -12,3 +12,6 @@ out/
 
 # Rust 原生引擎的编译产物与依赖缓存
 native/pylon-vnc/target/
+
+# Rust 编译产物与缓存
+native/pylon-stream-sender/target/
