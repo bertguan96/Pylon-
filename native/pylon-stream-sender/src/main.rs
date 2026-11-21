@@ -33,6 +33,7 @@ fn main() {
     let bitrate: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(40);
     let monitor: u32 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
     let ffmpeg_path = args.get(6).map(std::path::PathBuf::from);
+    let target_port: u16 = args.get(7).and_then(|s| s.parse().ok()).unwrap_or(port);
 
     eprintln!("[sender] 目标={} 端口={} {}fps {}Mbps 显示器#{}", console_ip, port, fps, bitrate, monitor);
 
@@ -93,8 +94,8 @@ fn main() {
     let mut clients: HashMap<SocketAddr, Instant> = HashMap::new();
     if console_ip != "any" && console_ip != "0.0.0.0" {
         if let Ok(ip) = console_ip.parse::<IpAddr>() {
-            clients.insert(SocketAddr::new(ip, port), Instant::now());
-            eprintln!("[sender] 预登记控制台 {}", SocketAddr::new(ip, port));
+            clients.insert(SocketAddr::new(ip, target_port), Instant::now());
+            eprintln!("[sender] 预登记控制台 {}", SocketAddr::new(ip, target_port));
         }
     }
 
@@ -104,6 +105,8 @@ fn main() {
     let input_h = height;
     std::thread::spawn(move || {
         let mut buf = [0u8; 2048];
+        let mut err_count = 0u32;
+        let mut err_reported = false;
         loop {
             match sock_in.recv_from(&mut buf) {
                 Ok((n, from)) if n >= HEADER => {
@@ -135,7 +138,17 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 Err(e) => {
-                    eprintln!("[sender] UDP 收包错误: {e}");
+                    // 客户端断开后 sendto 会触发 ICMP 错误，导致 recv 报 10060。
+                    // 这是正常的，不能每帧刷日志（会拖垮主循环），限频报一次。
+                    err_count += 1;
+                    if !err_reported {
+                        eprintln!("[sender] UDP 收包错误（已抑制后续）: {e}");
+                        err_reported = true;
+                    }
+                    if err_count % 500 == 0 {
+                        err_count = 0;
+                        err_reported = false; // 每 500 次允许再报一次，便于发现持续故障
+                    }
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }

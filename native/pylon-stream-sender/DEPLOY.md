@@ -70,6 +70,12 @@ pylon-stream-sender.exe any 48000 60 40 0 C:\pylon-stream\ffmpeg.exe
 
 ## 常见问题
 
+**画面全黑（但显示 fps 正常）**
+- 被控 Windows 处于**锁屏 / 注销 / 远程桌面断开**状态时，显卡不输出桌面纹理，
+  DXGI 只能抓到黑帧（日志会显示「非黑 0，最大亮度 0」）。
+- 解决：让被控机保持解锁状态。不要用 RDP 断开连接后离开，那会锁屏。
+- 这是所有屏幕采集方案的共同限制（和 Mac 锁屏一样），不是本程序 bug。
+
 **`采集初始化失败`**
 - 如果被控机当前在远程桌面（RDP）会话里，DXGI Desktop Duplication 不可用。
   要在被控机的物理控制台会话运行（或用 Parsec/TeamViewer 这类不锁 DXGI 的方式连入）。

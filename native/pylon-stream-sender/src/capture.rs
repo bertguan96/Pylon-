@@ -186,6 +186,21 @@ impl Capture {
             self.context.Unmap(&self.staging, 0);
             let _ = self.duplication.ReleaseFrame();
 
+            // 诊断：每 100 帧统计非黑像素比例，确认采集到的是真实画面
+            static DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let cnt = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if cnt % 100 == 0 {
+                let step = (bgra.len() / 4000).max(4) & !3;
+                let mut nonzero = 0usize;
+                let mut maxv = 0u8;
+                for i in (0..bgra.len() - step).step_by(step) {
+                    let v = bgra[i].max(bgra[i + 1]).max(bgra[i + 2]);
+                    if v > 8 { nonzero += 1; }
+                    maxv = maxv.max(v);
+                }
+                eprintln!("[capture] 诊断: 采样 {} 点, 非黑 {}, 最大亮度 {}", bgra.len()/step, nonzero, maxv);
+            }
+
             Ok(Some(CapturedFrame {
                 width: w,
                 height: h,

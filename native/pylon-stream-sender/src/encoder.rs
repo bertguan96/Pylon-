@@ -11,7 +11,8 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{channel, Receiver, Sender};
 
 pub struct EncodeInput<'a> {
     pub bgra: &'a [u8],
@@ -22,10 +23,10 @@ pub struct EncodeInput<'a> {
 pub struct Encoder {
     child: Child,
     stdin: ChildStdin,
-    stdout: ChildStdout,
+    rx: Receiver<Vec<u8>>,
+    read_buf: Vec<u8>,
     width: u32,
     height: u32,
-    read_buf: Vec<u8>,
     frames: u32,
 }
 
@@ -92,26 +93,41 @@ impl Encoder {
         cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::inherit());
 
         let mut child = cmd.spawn().map_err(|e| format!("启动 ffmpeg 失败（{:?}）: {}", exe, e))?;
         let stdin = child.stdin.take().ok_or("ffmpeg stdin 不可用")?;
-        let stdout = child.stdout.take().ok_or("ffmpeg stdout 不可用")?;
+        let mut stdout = child.stdout.take().ok_or("ffmpeg stdout 不可用")?;
+        // 独立线程读 stdout：ffmpeg 要攒够帧才输出，主线程不能阻塞在 read 上
+        let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 128 * 1024];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => { if tx.send(buf[..n].to_vec()).is_err() { break; } }
+                    Err(_) => break,
+                }
+            }
+        });
 
         eprintln!("[encoder] ffmpeg {} 就绪 {}×{} @{}fps {}Mbps", codec, width, height, fps, bitrate_mbps);
         Ok(Self {
             child,
             stdin,
-            stdout,
+            rx,
+            read_buf: Vec::with_capacity(256 * 1024),
             width,
             height,
-            read_buf: Vec::with_capacity(256 * 1024),
             frames: 0,
         })
     }
 
     /// 编码一帧：写 BGRA 到 stdin，读回 H.264 Annex-B 数据。
     pub fn encode(&mut self, input: &EncodeInput<'_>) -> Result<&[u8], String> {
+        if let Some(status) = self.child.try_wait().map_err(|e| format!("try_wait: {e}"))? {
+            return Err(format!("ffmpeg 进程已退出（status {status}）"));
+        }
         let expected = (self.width * self.height * 4) as usize;
         if input.bgra.len() < expected {
             return Err(format!("BGRA 帧大小不对：{} < {}", input.bgra.len(), expected));
@@ -121,21 +137,11 @@ impl Encoder {
             .map_err(|e| format!("写 ffmpeg stdin 失败: {}", e))?;
         self.frames += 1;
 
-        // 读取 stdout 当前已有的编码数据（非阻塞）
+        // 从 channel 非阻塞收取 ffmpeg 已编码的数据
         self.read_buf.clear();
-        let mut chunk = [0u8; 64 * 1024];
-        loop {
-            match self.stdout.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    self.read_buf.extend_from_slice(&chunk[..n]);
-                    if self.read_buf.len() >= 256 * 1024 {
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(format!("读 ffmpeg stdout 失败: {}", e)),
-            }
+        while let Ok(chunk) = self.rx.try_recv() {
+            self.read_buf.extend_from_slice(&chunk);
+            if self.read_buf.len() >= 2 * 1024 * 1024 { break; }
         }
         Ok(&self.read_buf)
     }
