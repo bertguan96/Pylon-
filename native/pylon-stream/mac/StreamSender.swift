@@ -75,27 +75,56 @@ func header(type: UInt8, flags: UInt16, seq: UInt32) -> Data {
 
 // MARK: - UDP
 
+/// 把 sockaddr_in 变成稳定的字符串 key，用于去重客户端
+func addrKey(_ a: sockaddr_in) -> String {
+    var addr = a.sin_addr
+    var host = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+    inet_ntop(AF_INET, &addr, &host, socklen_t(INET_ADDRSTRLEN))
+    return "\(String(cString: host)):\(UInt16(bigEndian: a.sin_port))"
+}
+
 final class Udp {
     let fd: Int32
-    let dest: sockaddr_in
+    let port: UInt16
     let queue = DispatchQueue(label: "pylon.stream.send", qos: .userInteractive)
     let lock = NSLock()
     var seq: UInt32 = 1
 
+    /// 已发现的客户端。任何合法包（HELLO/PING/INPUT）都会刷新 last，用来做超时剔除。
+    var clients: [String: (addr: sockaddr_in, last: DispatchTime)] = [:]
+    let clientsLock = NSLock()
+
+    var clientCount: Int {
+        clientsLock.lock(); defer { clientsLock.unlock() }
+        return clients.count
+    }
+
     init?(host: String, port: UInt16) {
+        self.port = port
         fd = socket(AF_INET, SOCK_DGRAM, Int32(IPPROTO_UDP))
         if fd < 0 { plog("socket 失败: \(String(cString: strerror(errno)))"); return nil }
-        var a = sockaddr_in()
-        a.sin_family = sa_family_t(AF_INET)
-        a.sin_port = in_port_t(port.bigEndian)
-        a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        if inet_pton(AF_INET, host, &a.sin_addr) != 1 {
-            plog("目标 IP 无效: \(host)"); return nil
+        // 允许地址复用 + 广播（多客户端场景下要能往广播地址发）
+        var one: Int32 = 1
+        _ = withUnsafePointer(to: &one) {
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, $0, socklen_t(MemoryLayout<Int32>.size))
+            setsockopt(fd, SOL_SOCKET, SO_BROADCAST, $0, socklen_t(MemoryLayout<Int32>.size))
         }
-        dest = a
-        var buf: Int32 = 4 * 1024 * 1024
+        var buf: Int32 = 8 * 1024 * 1024
         _ = withUnsafePointer(to: &buf) {
             setsockopt(fd, SOL_SOCKET, SO_SNDBUF, $0, socklen_t(MemoryLayout<Int32>.size))
+        }
+        // host 作为初始客户端登记；传 "any" / "0.0.0.0" 表示纯靠 HELLO 发现
+        if host != "any" && host != "0.0.0.0" {
+            var a = sockaddr_in()
+            a.sin_family = sa_family_t(AF_INET)
+            a.sin_port = in_port_t(port.bigEndian)
+            a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            if inet_pton(AF_INET, host, &a.sin_addr) == 1 {
+                register(a)
+                plog("初始客户端 \(addrKey(a))")
+            } else {
+                plog("目标 IP 无效: \(host)")
+            }
         }
     }
 
@@ -106,6 +135,29 @@ final class Udp {
         let s = seq; seq &+= 1; return s
     }
 
+    func register(_ a: sockaddr_in) {
+        let k = addrKey(a)
+        clientsLock.lock()
+        let isNew = clients[k] == nil
+        clients[k] = (a, .now())
+        clientsLock.unlock()
+        if isNew { plog("客户端加入 \(k)（当前 \(clientCount) 台）") }
+    }
+
+    func unregister(_ a: sockaddr_in) {
+        let k = addrKey(a)
+        clientsLock.lock(); clients.removeValue(forKey: k); clientsLock.unlock()
+        plog("客户端离开 \(k)（剩余 \(clientCount) 台）")
+    }
+
+    /// 定向发给某一个客户端（回 CAPS / 回 PING 用）
+    func sendTo(type: UInt8, flags: UInt16 = 0, payload: Data = Data(), addr: sockaddr_in) {
+        var p = header(type: type, flags: flags, seq: nextSeq())
+        p.append(payload)
+        queue.sync { raw(p, to: addr) }
+    }
+
+    /// 广播给所有已发现客户端（视频帧 / 保活用）
     func send(type: UInt8, flags: UInt16 = 0, payload: Data = Data()) {
         var p = header(type: type, flags: flags, seq: nextSeq())
         p.append(payload)
@@ -136,16 +188,34 @@ final class Udp {
         }
     }
 
-    fileprivate func raw(_ p: Data) {
+    fileprivate func raw(_ p: Data, to only: sockaddr_in? = nil) {
+        let now = DispatchTime.now()
+        var targets: [sockaddr_in] = []
+        if let one = only {
+            targets = [one]
+        } else {
+            clientsLock.lock()
+            // 剔除 6 秒无任何流量的客户端（Windows 关了就不会再收到 40Mbps 视频）
+            let stale = clients.filter {
+                now.uptimeNanoseconds - $0.value.last.uptimeNanoseconds > 6_000_000_000
+            }.map { $0.key }
+            for k in stale { clients.removeValue(forKey: k) }
+            targets = clients.values.map { $0.addr }
+            clientsLock.unlock()
+        }
+        guard !targets.isEmpty else { return }
+
         p.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else { return }
-            var dst = dest
-            let n = withUnsafePointer(to: &dst) { dp in
-                dp.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
-                    sendto(fd, base, p.count, 0, sp, socklen_t(MemoryLayout<sockaddr_in>.size))
+            for var dst in targets {
+                _ = withUnsafePointer(to: &dst) { dp in
+                    dp.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                        sendto(fd, base, p.count, 0, sp,
+                               socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
                 }
+                // 不在这里打日志：客户端关掉后 sendto 会持续失败，刷屏会拖垮主循环
             }
-            if n < 0 { plog("sendto: \(String(cString: strerror(errno)))") }
         }
     }
 }
@@ -367,18 +437,41 @@ func startInput(port: UInt16, injector: Injector) {
     let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .global(qos: .userInteractive))
     src.setEventHandler {
         var buf = [UInt8](repeating: 0, count: 2048)
-        let n = buf.withUnsafeMutableBytes { recvfrom(fd, $0.baseAddress, 2048, 0, nil, nil) }
-        if n <= 12 { return }
+        var from = sockaddr_in()
+        var fromLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let n = withUnsafeMutablePointer(to: &from) { fp in
+            fp.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                buf.withUnsafeMutableBytes { bp in
+                    recvfrom(fd, bp.baseAddress, 2048, 0, sp, &fromLen)
+                }
+            }
+        }
+        if n <= Int(12) { return }
         let d = Data(buf[0..<Int(n)])
         guard rd32(d, 0) == MAGIC else { return }
+
+        // 任何合法包都说明这台客户端还活着：登记 / 刷新保活时间
+        gUdp?.register(from)
+
         switch d[5] {
-        case TYPE_INPUT: injector.handle(d.subdata(in: 12..<d.count))
-        case TYPE_PING:  gUdp?.send(type: TYPE_PING, payload: d.subdata(in: 12..<d.count))
-        case TYPE_KEYREQ: gSender?.requestKeyframe()
+        case TYPE_INPUT:
+            // 两台 Windows 的输入都注入 —— 谁动了鼠标键盘谁就控制 Mac。
+            // 同时动会打架，但那是使用层面的协调，协议层不仲裁。
+            injector.handle(d.subdata(in: 12..<d.count))
+        case TYPE_PING:
+            // 按来源定向回，不要广播 —— 广播会让两台客户端互相收到对方的 PING 回包
+            gUdp?.sendTo(type: TYPE_PING, payload: d.subdata(in: 12..<d.count), addr: from)
+        case TYPE_KEYREQ:
+            gSender?.requestKeyframe()
         case TYPE_HELLO:
-            gUdp?.send(type: TYPE_CAPS, payload: caps(w: gSender?.w ?? 0,
-                                                       h: gSender?.h ?? 0, fps: gSender?.fps ?? 60))
-        case TYPE_GOODBYE: exit(0)
+            // CAPS 只回给发 HELLO 的那一台
+            gUdp?.sendTo(type: TYPE_CAPS,
+                         payload: caps(w: gSender?.w ?? 0, h: gSender?.h ?? 0,
+                                       fps: gSender?.fps ?? 60),
+                         addr: from)
+        case TYPE_GOODBYE:
+            // 只移除这一台，不能像单客户端那样 exit(0)
+            gUdp?.unregister(from)
         default: break
         }
     }
@@ -399,7 +492,8 @@ func caps(w: Int, h: Int, fps: Int) -> Data {
 func run() {
     let a = CommandLine.arguments
     guard a.count >= 2 else {
-        plog("用法: \(a[0]) <Windows IP> [端口=48000] [帧率=60] [码率Mbps=40]")
+        plog("用法: \(a[0]) <Windows IP|any> [端口=48000] [帧率=60] [码率Mbps=40]")
+        plog("  多台 Windows：用 any 让客户端连上后自动登记，或填任意一台的 IP")
         exit(2)
     }
     let host = a[1]
