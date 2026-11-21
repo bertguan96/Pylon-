@@ -59,6 +59,9 @@ export default function App() {
     null
   )
   const [quickOpen, setQuickOpen] = useState(false)
+  /** 串流连接输入框（Electron 45 的渲染进程不支持 window.prompt） */
+  const [streamPrompt, setStreamPrompt] = useState(false)
+  const [streamHost, setStreamHost] = useState('')
   /** rz / sz 传输进度，按 sessionId 归类 */
   const [transfers, setTransfers] = useState<Record<string, ZmodemState>>({})
   /** 远程桌面的分辨率与实时帧率，按 sessionId 归类 */
@@ -473,11 +476,8 @@ export default function App() {
             <div className="tabbar-actions">
               <button
                 className="qc-toggle"
-                title="自研串流（Mac 端需先运行 pylon-stream-sender）"
-                onClick={() => {
-                  const host = window.prompt('输入 Mac 的 IP 地址（Mac 端需先运行 pylon-stream-sender）')
-                  if (host?.trim()) void startStream(host.trim())
-                }}
+                title="自研串流（被控端需先运行 pylon-stream-sender）"
+                onClick={() => setStreamPrompt((v) => !v)}
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="2" y="4" width="20" height="13" rx="2" />
@@ -500,6 +500,39 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          {streamPrompt && (
+            <div className="stream-prompt-bar">
+              <span>被控端 IP</span>
+              <input
+                autoFocus
+                value={streamHost}
+                placeholder="192.168.31.xxx"
+                onChange={(e) => setStreamHost(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && streamHost.trim()) {
+                    void startStream(streamHost.trim())
+                    setStreamPrompt(false)
+                    setStreamHost('')
+                  } else if (e.key === 'Escape') {
+                    setStreamPrompt(false)
+                  }
+                }}
+              />
+              <button
+                onClick={() => {
+                  if (streamHost.trim()) {
+                    void startStream(streamHost.trim())
+                    setStreamPrompt(false)
+                    setStreamHost('')
+                  }
+                }}
+              >
+                连接
+              </button>
+              <button onClick={() => setStreamPrompt(false)}>取消</button>
+            </div>
+          )}
 
           <TransferStack
             transfers={Object.values(transfers)}
